@@ -75,6 +75,7 @@ Each row is attributed to the **first** rule it violates, so the counts sum exac
 | rule | rows_removed | pct_of_raw |
 |---|---|---|
 | duplicate_ride_id | 0 | 0.00 |
+| null_ride_id | 0 | 0.00 |
 | null_timestamp | 0 | 0.00 |
 | outside_project_window | 0 | 0.00 |
 | end_before_start | 0 | 0.00 |

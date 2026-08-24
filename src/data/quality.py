@@ -173,12 +173,19 @@ def _dst_hour_profile(con: duckdb.DuckDBPyConnection, view: str, cfg) -> list[di
         datetime.fromisoformat(cfg.dotted("time.start_date")),
         datetime.fromisoformat(cfg.dotted("time.end_date")),
     )
-    # normalise to UTC-aware keys: DuckDB hands back TIMESTAMPTZ in the session zone
-    def _utc(value):
-        return value.astimezone(timezone.utc).replace(tzinfo=timezone.utc)
+    # Bucket in EXPLICIT UTC. `date_trunc('hour', started_at)` truncates in the
+    # session timezone, which for America/New_York collapses both passes through the
+    # repeated fall-back hour onto one local label and shifts the counts by an hour -
+    # the very distortion this table exists to show. `AT TIME ZONE 'UTC'` converts to
+    # a naive UTC timestamp first, so the buckets are real UTC hours.
+    def _naive_utc(value):
+        return value.replace(tzinfo=None) if value.tzinfo is None else value.astimezone(
+            timezone.utc
+        ).replace(tzinfo=None)
 
     effects = {
-        _utc(h["utc_hour_start"]): h["effect"] for h in dst_unreliable_utc_hours(transitions)
+        _naive_utc(h["utc_hour_start"]): h["effect"]
+        for h in dst_unreliable_utc_hours(transitions)
     }
 
     ranges = []
@@ -192,23 +199,28 @@ def _dst_hour_profile(con: duckdb.DuckDBPyConnection, view: str, cfg) -> list[di
     rows = _rows(
         con,
         f"""
-        SELECT date_trunc('hour', started_at) AS utc_hour, count(*) AS rides
+        SELECT date_trunc('hour', started_at AT TIME ZONE 'UTC') AS utc_hour,
+               count(*) AS rides
         FROM {view} WHERE started_at IS NOT NULL AND ({where})
         GROUP BY 1 ORDER BY 1
         """,
     )
-    seen = {_utc(row["utc_hour"]) for row in rows}
+    seen = {_naive_utc(row["utc_hour"]) for row in rows}
     for hour_start in effects:
         if hour_start not in seen:
             rows.append({"utc_hour": hour_start, "rides": 0})
     for row in rows:
-        row["utc_hour"] = _utc(row["utc_hour"])
+        row["utc_hour"] = _naive_utc(row["utc_hour"])
         row["expected_effect"] = effects.get(row["utc_hour"], "-")
     return sorted(rows, key=lambda r: r["utc_hour"])
 
 
 def _fmt(value) -> str:
     if isinstance(value, float):
+        # small percentages are the interesting ones here - 0.00 hides whether a rule
+        # removed 178 rows or none at all
+        if value != 0 and abs(value) < 0.01:
+            return f"{value:,.4f}"
         return f"{value:,.2f}"
     if isinstance(value, int):
         return f"{value:,}"
@@ -223,6 +235,10 @@ def _table(rows: list[dict]) -> str:
     for row in rows:
         out.append("| " + " | ".join(_fmt(row[h]) for h in headers) + " |")
     return "\n".join(out) + "\n"
+
+
+# public alias: other report writers (traffic) render tables the same way
+render_table = _table
 
 
 def render_markdown(report: dict, drop_waterfall: list[dict] | None, title: str) -> str:
@@ -259,6 +275,20 @@ def render_markdown(report: dict, drop_waterfall: list[dict] | None, title: str)
         "",
     ]
     lines += ["## Station id completeness", "", _table([report["station_completeness"]])]
+    lines += [
+        "## DST transition hours (UTC)",
+        "",
+        "Citi Bike publishes naive local wall-clock time, which cannot say which pass "
+        "through the repeated fall-back hour a ride belongs to. Under the "
+        "`ambiguous=\"earliest\"` policy the distortion is deterministic: the first "
+        "(EDT) pass absorbs both hours' rides (`over_filled`), the second (EST) pass "
+        "is unreachable and therefore empty by construction, and spring-forward "
+        "timestamps that cannot exist are shifted one hour forward (`shifted_in`). "
+        "Four hours across 2023-2024 are affected; Phase 2 must flag these bins "
+        "rather than model them as observed demand.",
+        "",
+        _table(report["dst_hour_profile"]),
+    ]
     lines += ["## Rides per day", "", _table([report["rides_per_day_summary"]])]
     lines += ["## Rides per month", "", _table(report["rides_per_month"])]
     lines += ["## Rideable type", "", _table(report["category_mix"]["rideable_type"])]

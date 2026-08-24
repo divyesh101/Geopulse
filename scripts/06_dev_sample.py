@@ -109,6 +109,27 @@ def main() -> int:
     else:
         log.warning("no events file at %s - run scripts/04_prepare_events.py", events_src)
 
+    traffic_src = interim / "traffic_clean.parquet"
+    if traffic_src.exists():
+        traffic = (
+            pl.scan_parquet(traffic_src)
+            .filter((pl.col("data_as_of") >= warmup_utc) & (pl.col("data_as_of") < end_utc))
+            .collect(engine="streaming")
+        )
+        traffic.write_parquet(out_dir / "traffic_clean.parquet", compression="zstd")
+        manifest["traffic_rows"] = traffic.height
+        log.info("traffic: %s readings (incl. %d warm-up days)",
+                 f"{traffic.height:,}", args.warmup_days)
+    else:
+        log.warning("no cleaned traffic at %s - run scripts/08_clean_traffic.py", traffic_src)
+
+    links_src = spatial / "traffic_links.parquet"
+    if links_src.exists():
+        links = pl.read_parquet(links_src)
+        links.write_parquet(out_dir / "traffic_links.parquet", compression="zstd")
+        manifest["traffic_link_rows"] = links.height
+        log.info("traffic links: %s", f"{links.height:,}")
+
     registry_src = spatial / "station_registry.parquet"
     if registry_src.exists():
         active = set(trips["start_station_id"].drop_nulls().unique().to_list()) | set(

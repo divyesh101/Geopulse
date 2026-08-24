@@ -165,6 +165,48 @@ def test_station_registry_is_consistent(cfg):
     assert (registry["appearances"] == registry["pickups"] + registry["dropoffs"]).all()
 
 
+def test_events_are_clean_and_timezone_aware(cfg):
+    from src.utils.config import resolve_path
+
+    path = resolve_path(cfg, "paths.external") / "events.parquet"
+    if not path.exists():
+        pytest.skip("events not prepared yet")
+    events = pl.read_parquet(path)
+    schema = events.collect_schema()
+    for column in ("event_start", "event_end"):
+        assert schema[column].time_zone == "UTC"
+    assert events["event_start"].is_sorted()
+    # an event ending before it starts is a data error and must not survive
+    assert (events["event_end"] >= events["event_start"]).all()
+    assert events["duration_minutes"].min() >= 0
+    assert events["event_start"].null_count() == 0
+    assert events["event_end"].null_count() == 0
+    # multi-week permits are flagged, not dropped - they are background, not spikes
+    assert "is_long_running" in events.columns
+    threshold = cfg.dotted("events.long_running_minutes")
+    flagged = events.filter(pl.col("duration_minutes") > threshold)
+    assert bool(flagged["is_long_running"].all())
+    assert not bool(
+        events.filter(pl.col("duration_minutes") <= threshold)["is_long_running"].any()
+    )
+
+
+def test_event_location_inventory_matches_events(cfg):
+    """Events carry no coordinates; Phase 4 must geocode this exact set of strings."""
+    from src.utils.config import resolve_path
+
+    external = resolve_path(cfg, "paths.external")
+    if not (external / "event_locations.parquet").exists():
+        pytest.skip("events not prepared yet")
+    events = pl.read_parquet(external / "events.parquet")
+    locations = pl.read_parquet(external / "event_locations.parquet")
+    assert set(locations.columns) >= {"event_location", "event_borough", "n_event_rows"}
+    assert locations["n_event_rows"].sum() == events.height
+    assert locations.height == events.select(
+        ["event_location", "event_borough"]
+    ).unique().height
+
+
 def test_weather_grid_is_complete_and_hourly(cfg):
     from src.utils.config import resolve_path
 

@@ -110,7 +110,30 @@ def main() -> int:
 
     df = df.with_columns(
         ((pl.col("event_end") - pl.col("event_start")).dt.total_minutes()).alias("duration_minutes")
-    ).sort("event_start")
+    )
+
+    # An event that ends before it starts is a data error, not a short event.
+    if cfg.dotted("events.drop_end_before_start"):
+        before = df.height
+        df = df.filter(pl.col("duration_minutes") >= 0)
+        log.info("rule end_before_start: dropped %s rows (%.4f%%)",
+                 f"{before - df.height:,}", 100 * (before - df.height) / max(before, 1))
+
+    # Multi-week permits are background conditions, not demand spikes. Flag, don't drop -
+    # Phase 4 decides whether to treat them as events at all.
+    long_running = cfg.dotted("events.long_running_minutes")
+    df = df.with_columns(
+        (pl.col("duration_minutes") > long_running).alias("is_long_running")
+    )
+    log.info("flag is_long_running (> %s min): %s rows (%.2f%%)",
+             f"{long_running:,}", f"{int(df['is_long_running'].sum()):,}",
+             100 * float(df["is_long_running"].mean()))
+    log.info("duration_minutes: median=%s p95=%s max=%s",
+             int(df["duration_minutes"].median()),
+             int(df["duration_minutes"].quantile(0.95)),
+             int(df["duration_minutes"].max()))
+
+    df = df.sort("event_start")
 
     df.write_parquet(out_path, compression="zstd")
     log.info("wrote %s events -> %s", f"{df.height:,}", out_path)

@@ -28,11 +28,10 @@ sources:
   citibike_trip_glob: "*-citibike-tripdata*.csv"
   station_roster_csv: "C:/Users/91738/Downloads/citibike_stations_data.csv"
   events_csv: "C:/Users/91738/Downloads/NYC_Permitted_Event_Information_-_Historical_20260824.csv"
-  # NOTE: the traffic export below only covers 2018-07-26..2018-07-30 (row-capped
-  # Socrata UI export). It is unusable for 2023-2024 and must be re-pulled via the
-  # Socrata API with a date filter. See docs/DATA_SOURCES.md.
-  traffic_csv: "C:/Users/91738/Downloads/DOT_traffic_speeds_after_2018-07-01_20260824.csv"
-  traffic_usable: false
+  # The manually downloaded DOT_traffic_speeds_after_2018-07-01_*.csv covered
+  # 2018-07-26..30 only (row-capped Socrata UI export) and is NOT used. Traffic is
+  # pulled from the Socrata API instead - see the `traffic:` block below.
+  traffic_usable: true
 
 time:
   timezone: America/New_York
@@ -103,6 +102,44 @@ weather:
   freezing_temp_c: 0.0
   high_wind_kmh: 30.0
   ffill_max_hours: 3
+
+events:
+  # Rows whose end precedes their start are data errors and are dropped (counted).
+  drop_end_before_start: true
+  # Permits can run for months or years (max observed: ~2.5 years). Those are
+  # background conditions, not demand spikes, so they are FLAGGED rather than
+  # dropped and Phase 4 decides how to treat them.
+  long_running_minutes: 10080   # 7 days
+
+traffic:
+  # NYC DOT "Real-Time Traffic Speed Data" (Socrata dataset i4gi-tjb9).
+  # ~23.8M observations over 2023-2024 across ~122 road links, one reading per link
+  # roughly every 5 minutes.
+  dataset_id: i4gi-tjb9
+  domain: data.cityofnewyork.us
+  # Optional Socrata app token. Anonymous requests work but are throttled harder.
+  # Set the environment variable below rather than putting a token in the repo.
+  app_token_env: SOCRATA_APP_TOKEN
+  # Only these columns vary per observation. link_points / encoded_poly_line are
+  # static per link and are pulled once into the link registry instead - carrying
+  # them per row is what made the manual UI export unusably large.
+  observation_columns: [id, link_id, speed, travel_time, status, data_as_of]
+  registry_columns: [link_id, borough, link_name, owner, link_points, encoded_poly_line]
+  # Paginate by time window, not by $offset: deep offsets get slower and slower,
+  # while data_as_of is indexed.
+  chunk_days: 1
+  page_limit: 200000
+  max_retries: 5
+  retry_backoff_seconds: 5
+  request_timeout_seconds: 180
+  # `status` is the feed's own validity marker: "0" is a real reading, anything
+  # else (in practice "-101", ~20% of rows) means the sensor reported nothing and
+  # the row carries speed = 0. Keeping those would drag every average toward zero.
+  valid_status: "0"
+  # Speeds are mph. 0 is not a plausible observed speed on these links; the feed
+  # uses it as a filler for invalid rows.
+  min_speed_mph: 0.1
+  max_speed_mph: 100.0
 
 logging:
   level: INFO

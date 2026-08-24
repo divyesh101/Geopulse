@@ -28,6 +28,11 @@ CASES = [
     ("r_rt", None, "('r_rt', TIMESTAMP '2023-06-01 10:00:00', TIMESTAMP '2023-06-01 10:20:00', 1200, 40.75, -73.98, 40.75, -73.98, 'A', 'A')"),
     ("r_ms", None, "('r_ms', TIMESTAMP '2023-06-01 10:00:00', TIMESTAMP '2023-06-01 10:20:00', 1200, 40.75, -73.98, 40.76, -73.97, NULL, 'B')"),
     ("r_nt", "null_timestamp", "('r_nt', NULL, TIMESTAMP '2023-06-01 10:20:00', 1200, 40.75, -73.98, 40.76, -73.97, 'A', 'B')"),
+    # regression: a NULL ride_id must survive de-duplication and be dropped by a
+    # NAMED rule. `WHERE ride_id NOT IN (...)` is NULL for a NULL ride_id, which
+    # silently discarded this row before - exactly the kind of unattributed drop
+    # Phase 1 forbids.
+    (None, "null_ride_id", "(NULL, TIMESTAMP '2023-06-01 10:00:00', TIMESTAMP '2023-06-01 10:20:00', 1200, 40.75, -73.98, 40.76, -73.97, 'A', 'B')"),
     ("r_bw", "outside_project_window", "('r_bw', TIMESTAMP '2022-12-31 23:00:00', TIMESTAMP '2022-12-31 23:20:00', 1200, 40.75, -73.98, 40.76, -73.97, 'A', 'B')"),
     ("r_aw", "outside_project_window", "('r_aw', TIMESTAMP '2025-01-01 00:30:00', TIMESTAMP '2025-01-01 00:50:00', 1200, 40.75, -73.98, 40.76, -73.97, 'A', 'B')"),
     ("r_eb", "end_before_start", "('r_eb', TIMESTAMP '2023-06-01 10:00:00', TIMESTAMP '2023-06-01 09:00:00', -3600, 40.75, -73.98, 40.76, -73.97, 'A', 'B')"),

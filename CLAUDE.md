@@ -54,8 +54,11 @@ reach those phases, OR-Tools (rebalancing, phase 11+), Parquet everywhere.
 - Raw Citi Bike CSVs: `C:/Users/91738/OneDrive/Desktop/Citi BIke data` (90 files, 15 GB, 2023-01..2024-12)
 - Station roster: `C:/Users/91738/Downloads/citibike_stations_data.csv` (id, name, lat, lng — no capacity)
 - Events: `C:/Users/91738/Downloads/NYC_Permitted_Event_Information_-_Historical_20260824.csv`
-- Traffic: `C:/Users/91738/Downloads/DOT_traffic_speeds_after_2018-07-01_20260824.csv`
-  **BROKEN — export only covers 2018-07-26..2018-07-30 (194k rows). Needs re-pull.**
+- Traffic: pulled from the **Socrata API**, dataset `i4gi-tjb9`, by
+  `scripts/07_fetch_traffic.py`. Do NOT use the manual
+  `DOT_traffic_speeds_after_2018-07-01_*.csv` download — that UI export was row-capped
+  to 2018-07-26..30 and has zero overlap with the project window.
+  Set `$SOCRATA_APP_TOKEN` for a higher rate limit (optional).
 - All paths are configured in `configs/base.yaml`, not hardcoded in code.
 
 ## Hardware on this machine

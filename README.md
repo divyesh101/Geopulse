@@ -46,8 +46,13 @@ python scripts/02_clean.py             # quality report + rules + sort   (data/i
 python scripts/03_fetch_weather.py     # Open-Meteo archive              (data/external)
 python scripts/04_prepare_events.py    # NYC permitted events            (data/external)
 python scripts/05_station_registry.py  # station registry                (data/spatial)
+python scripts/07_fetch_traffic.py     # DOT traffic speeds via Socrata  (data/raw/traffic)
+python scripts/08_clean_traffic.py     # traffic quality report + rules  (data/interim)
 python scripts/06_dev_sample.py        # 7-day dev slice                 (data/dev_sample)
 ```
+
+`scripts/07_fetch_traffic.py` is resumable: days already written are skipped, so an
+interrupted pull just carries on. Set `SOCRATA_APP_TOKEN` for a higher rate limit.
 
 Every stage takes `--dev-sample` or is derived from the dev sample, so a new
 pipeline step can be verified on 7 days before it touches two years.

@@ -74,7 +74,18 @@ def test_paths_resolve_under_repo(cfg):
         assert resolve_path(cfg, key).is_absolute()
 
 
-def test_traffic_source_is_marked_unusable(cfg):
-    """The downloaded DOT traffic export covers 2018 only; the config must say so
-    until it is re-pulled, so no phase silently builds features from it."""
-    assert cfg.dotted("sources.traffic_usable") is False
+def test_traffic_comes_from_the_api_not_the_broken_export(cfg):
+    """Traffic is pulled from Socrata, not from the manual CSV export.
+
+    That export was row-capped to 2018-07-26..30 and had zero overlap with the
+    project window. The config must not point at it again, and the API pull must
+    request only the per-observation columns - the geometry columns are static per
+    link and belong in the link registry.
+    """
+    assert cfg.dotted("sources.traffic_usable") is True
+    assert cfg.dotted("sources", {}).get("traffic_csv") is None
+    assert cfg.dotted("traffic.dataset_id") == "i4gi-tjb9"
+    observation = set(cfg.dotted("traffic.observation_columns"))
+    assert {"link_id", "speed", "travel_time", "status", "data_as_of"} <= observation
+    assert not observation & {"link_points", "encoded_poly_line", "encoded_poly_line_lvls"}
+    assert "link_points" in cfg.dotted("traffic.registry_columns")
