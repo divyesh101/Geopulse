@@ -41,9 +41,9 @@ interface.
 5. Partition the panel by month to Parquet for cheap incremental reads.
 
 ## Definition of Done
-- [ ] `SpatialIndexer` interface + `H3Indexer` implemented and unit-tested
-- [ ] Active-region selection implemented, counts reported per resolution
-- [ ] Dense panel built: exactly one row per active region per interval, no gaps
-- [ ] Targets h1-h4 for pickups and dropoffs implemented and shift-tested
-- [ ] Panel verified on the 7-day dev sample first, then the full range
-- [ ] `docs/STATUS.md` updated, phase committed to git
+- [x] `SpatialIndexer` interface + `H3Indexer` implemented and unit-tested
+- [x] Active-region selection implemented, counts reported per resolution
+- [x] Dense panel built: exactly one row per active region per interval, no gaps
+- [x] Targets h1-h4 for pickups and dropoffs implemented and shift-tested
+- [x] Panel verified on the 7-day dev sample first, then the full range
+- [x] `docs/STATUS.md` updated, phase committed to git

@@ -2,7 +2,7 @@ PY := python
 export PYTHONUTF8 := 1
 export PYTHONIOENCODING := utf-8
 
-.PHONY: help ingest clean weather events registry traffic trafficclean devsample phase1 test
+.PHONY: help ingest clean weather events registry traffic trafficclean devsample \n        panel paneldev phase1 phase1check phase2 phase2check test
 
 help:
 	@echo "make ingest     - raw Citi Bike CSV -> typed UTC parquet (data/raw/trips)"
@@ -13,7 +13,12 @@ help:
 	@echo "make traffic    - pull DOT traffic speeds from Socrata -> data/raw/traffic"
 	@echo "make trafficclean - profile + clean traffic -> data/interim"
 	@echo "make devsample  - build the 7-day dev sample -> data/dev_sample"
+	@echo "make panel      - build the dense region x 15-min demand panel -> data/processed"
+	@echo "make paneldev   - same, on the 7-day dev sample"
 	@echo "make phase1     - run the whole Phase 1 pipeline"
+	@echo "make phase1check- verify the Phase 1 Definition of Done"
+	@echo "make phase2     - build the panel (Phase 2)"
+	@echo "make phase2check- verify the Phase 2 Definition of Done"
 	@echo "make test       - run pytest"
 
 ingest:
@@ -40,7 +45,21 @@ trafficclean:
 devsample:
 	$(PY) scripts/06_dev_sample.py
 
+panel:
+	$(PY) scripts/10_build_panel.py
+
+paneldev:
+	$(PY) scripts/10_build_panel.py --dev-sample
+
 phase1: ingest clean weather events registry traffic trafficclean devsample
+
+phase1check:
+	$(PY) scripts/09_phase1_check.py
+
+phase2: paneldev panel
+
+phase2check:
+	$(PY) scripts/11_phase2_check.py
 
 test:
 	$(PY) -m pytest tests -q

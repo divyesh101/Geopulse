@@ -1,14 +1,77 @@
 # STATUS
 
-**Current phase:** 1 — Foundation, Ingestion, Cleaning, Station Registry
-**State:** COMPLETE - gate run green, 11/11 checks, 78 tests passing
-(`python scripts/09_phase1_check.py`)
-**Next phase:** 2 — Spatial indexing + demand panel. **Do not start** until the
-Definition of Done below is fully checked.
+**Current phase:** 2 — Spatial indexing + demand panel — **COMPLETE**
+**State:** Phase 1 gate 11/11 (`scripts/09_phase1_check.py`),
+Phase 2 gate 11/11 (`scripts/11_phase2_check.py`), 100 tests passing
+**Next phase:** 3 — Minimal baseline (STOP-AND-VERIFY GATE). Seasonal Naive +
+a simple LightGBM per (target, horizon), plus the leakage and data-validation
+test suites. Nothing from Phase 4 starts until Phase 3 is boring and correct.
 
 ---
 
-## Phase 1 — Definition of Done
+## Phase 2 — Definition of Done
+
+Verified by `scripts/11_phase2_check.py` against the built panel.
+
+- [x] `SpatialIndexer` interface + `H3Indexer` implemented and unit-tested
+- [x] Active-region selection implemented, counts reported
+- [x] Dense panel: exactly one row per active region per interval, no gaps
+- [x] Targets h1-h4 implemented and shift-tested against an independent join
+- [x] Verified on the 7-day dev sample first, then the full range
+- [x] `docs/STATUS.md` updated, phase committed to git
+
+### The panel
+
+| | |
+|---|---|
+| Path | `data/processed/panel_h39/month=YYYYMM/` (24 partitions, 277 MB) |
+| Rows | **104,071,008** = 1,483 active regions x 70,176 bins — exactly dense |
+| Grid | 2023-01-01 05:00 UTC .. 2025-01-01 04:45 UTC, 15-min bins, 0 irregular gaps |
+| Columns | `region_id, ts, pickups, dropoffs, net_flow, dst_unreliable, pickup_h1..h4, dropoff_h1..h4` |
+| Reconciliation | panel pickups 79,150,890 == trips in active regions inside the grid |
+| Sparsity | 71.37% of (region, bin) cells have zero pickups at H3-9 |
+| Sort order | `(region_id, ts)` within each month partition |
+
+### Phase 2 decisions
+
+**Active regions come from observed activity**: >= 500 trips AND >= 180 active days
+over the two years. 1,570 regions were touched, 1,483 qualify, and they carry
+**99.98% of all trip endpoints** — so the rule discards 87 marginal regions while
+losing almost no demand.
+
+**Indexing 79M trips took 0.8 s, not an hour.** Citi Bike snaps coordinates to
+stations, so the whole dataset contains only **3,230 distinct (lat, lng) pairs**.
+Those are indexed once into a lookup table and joined, instead of calling H3
+158M times. It is exact, not an approximation, and `tests/test_spatial.py` asserts
+the DuckDB and Python H3 paths agree on real NYC points at resolutions 8/9/10.
+
+**Density is the contract.** A region with no trips in a bin is 0, not a missing
+row. The grid is built as an explicit cross join and counts are joined onto it, so
+`LEAD`-based targets and every later lag/rolling feature are computed on a
+guaranteed gap-free series.
+
+**Targets are shift-tested, not assumed.** `pickup_h{h}[r,t]` is re-derived by an
+independent timestamp self-join at every horizon — in the unit tests on the dev
+panel, and in the gate on 60 sampled regions (4.2M rows) of the full panel.
+Horizon overrun is **NULL, never 0**: a zero would teach the model a phantom
+demand collapse at the end of the series. Verified as exactly `regions x h` nulls.
+
+**DST-distorted bins are flagged, carrying Phase 1's finding forward.** 24 bins
+(6 distorted UTC hours x 4 bins) x 1,483 regions = 35,592 rows marked
+`dst_unreliable`. Phase 3 must exclude or down-weight them rather than learn the
+artificial nightly collapse they encode.
+
+**Thresholds scale to the window.** `min_active_days: 180` is unreachable in a
+7-day dev sample, which would have made the dev run select nothing and prove
+nothing. `scaled_thresholds()` rescales by window length (dev: >= 5 trips /
+>= 2 days) and logs loudly that it did, so the dev sample stays a real smoke test
+of the same code path.
+
+---
+
+## Phase 1 — Definition of Done (complete)
+
+---
 
 Verified by `scripts/09_phase1_check.py`, which reads the produced artifacts rather
 than taking anything on trust.
@@ -174,6 +237,9 @@ bare directory pattern matches at any depth. Now `/data/`.
 
 ## Running log
 
+- **2026-08-25** — Phase 2 complete. `SpatialIndexer` + `H3Indexer`, active-region
+  selection, and the dense 104M-row panel with h1-h4 targets built and gated
+  (11/11). Dev sample verified before the full range. Gate and tests green.
 - **2026-08-24** — Phase 1 complete. Repo scaffolded; configs written; 90 Citi Bike
   CSVs ingested (79,410,195 rows → 2.5 GB Parquet in 2.0 min via Polars); weather,
   events and traffic pulled; cleaning rules, quality reports, global chronological
