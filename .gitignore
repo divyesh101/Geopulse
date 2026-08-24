@@ -1,0 +1,24 @@
+# Data + heavy artifacts are reproducible from configs/ + scripts/ - never committed.
+# NOTE the leading slash: a bare `data/` would also ignore src/data/, the pipeline code.
+/data/
+/outputs/models/
+/outputs/figures/
+*.parquet
+*.csv
+!configs/*.csv
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

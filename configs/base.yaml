@@ -1,0 +1,109 @@
+# GeoPulse - base configuration
+# Every tunable value in the project lives in configs/. Nothing here is duplicated
+# as a literal in src/ or scripts/.
+
+project:
+  name: geopulse
+  random_seed: 42
+
+paths:
+  # Project-relative roots (resolved against the repo root by src.utils.config)
+  data_root: data
+  raw: data/raw
+  interim: data/interim
+  processed: data/processed
+  spatial: data/spatial
+  external: data/external
+  dev_sample: data/dev_sample
+  outputs: outputs
+  models: outputs/models
+  metrics: outputs/metrics
+  figures: outputs/figures
+  experiments: outputs/experiments
+  reports: outputs/reports
+
+sources:
+  # Absolute locations of the raw downloads on this machine.
+  citibike_trip_dir: "C:/Users/91738/OneDrive/Desktop/Citi BIke data"
+  citibike_trip_glob: "*-citibike-tripdata*.csv"
+  station_roster_csv: "C:/Users/91738/Downloads/citibike_stations_data.csv"
+  events_csv: "C:/Users/91738/Downloads/NYC_Permitted_Event_Information_-_Historical_20260824.csv"
+  # NOTE: the traffic export below only covers 2018-07-26..2018-07-30 (row-capped
+  # Socrata UI export). It is unusable for 2023-2024 and must be re-pulled via the
+  # Socrata API with a date filter. See docs/DATA_SOURCES.md.
+  traffic_csv: "C:/Users/91738/Downloads/DOT_traffic_speeds_after_2018-07-01_20260824.csv"
+  traffic_usable: false
+
+time:
+  timezone: America/New_York
+  start_date: "2023-01-01"
+  end_date: "2024-12-31"      # inclusive
+  interval_minutes: 15
+  horizons: [1, 2, 3, 4]      # in interval_minutes steps -> 15/30/45/60 min
+  reported_horizons: [1, 2, 4]  # 45-min (h3) stays internal, per Phase 7
+
+split:
+  train: {start: "2023-01-01", end: "2024-08-31"}
+  validate: {start: "2024-09-01", end: "2024-10-31"}
+  test: {start: "2024-11-01", end: "2024-12-31"}
+
+dev_sample:
+  # 7 consecutive days inside TRAIN, used to verify every pipeline stage first.
+  start: "2024-06-03"   # Monday
+  end: "2024-06-09"     # Sunday
+
+calendar:
+  morning_rush: {start_hour: 7, end_hour: 10}   # [start, end)
+  evening_rush: {start_hour: 16, end_hour: 19}  # [start, end)
+  holiday_country: US
+  holiday_subdiv: NY
+
+cleaning:
+  # Every rule below is applied as a *logged* filter - counts are written to the
+  # data-quality report. No silent drops.
+  min_duration_seconds: 60          # sub-minute rides are dock re-inserts / tests
+  max_duration_seconds: 86400       # 24h; Citi Bike auto-closes long rentals
+  drop_missing_coords: true
+  drop_missing_station_id: false    # keep, flag as dockless/unknown-station
+  drop_duplicate_ride_ids: true
+  drop_end_before_start: true
+  bbox:                             # NYC + Jersey City / Hoboken service area
+    lat_min: 40.55
+    lat_max: 41.00
+    lng_min: -74.15
+    lng_max: -73.70
+  round_trip_flag: true             # same start/end station: flag, do not drop
+
+station_registry:
+  coord_jump_km_threshold: 0.5      # flag stations whose observed coords span > this
+  min_rides_for_registry: 1
+
+weather:
+  provider: open_meteo
+  archive_url: "https://archive-api.open-meteo.com/v1/archive"
+  latitude: 40.7831                 # Central Park
+  longitude: -73.9712
+  hourly_variables:
+    - temperature_2m
+    - relative_humidity_2m
+    - apparent_temperature
+    - precipitation
+    - rain
+    - snowfall
+    - snow_depth
+    - wind_speed_10m
+    - wind_gusts_10m
+    - wind_direction_10m
+    - cloud_cover
+    # - visibility  # returned 100% null by the Open-Meteo/ERA5 archive - not available
+    - weather_code
+  # Feature thresholds (used in Phase 4)
+  rain_mm_threshold: 0.1
+  snow_cm_threshold: 0.1
+  freezing_temp_c: 0.0
+  high_wind_kmh: 30.0
+  ffill_max_hours: 3
+
+logging:
+  level: INFO
+  format: "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s"
