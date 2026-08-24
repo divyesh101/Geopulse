@@ -1,0 +1,36 @@
+{
+  "model": "stgnn",
+  "tag": "h39",
+  "device": "cpu",
+  "parameters": 52936,
+  "window": 24,
+  "batch_size": 4,
+  "epochs": 1,
+  "best_valid_mean_mae": 1.2711348235607147,
+  "history": [
+    {
+      "epoch": 1,
+      "train_loss": 0.8947656929492951,
+      "valid_mean_mae": 1.2711348235607147,
+      "per_horizon": {
+        "h1": {
+          "pickup_mae": 1.2640695571899414,
+          "dropoff_mae": 1.2713710069656372
+        },
+        "h2": {
+          "pickup_mae": 1.2721083164215088,
+          "dropoff_mae": 1.2928358316421509
+        },
+        "h3": {
+          "pickup_mae": 1.2814204692840576,
+          "dropoff_mae": 1.2245429754257202
+        },
+        "h4": {
+          "pickup_mae": 1.29460608959198,
+          "dropoff_mae": 1.2681243419647217
+        }
+      },
+      "seconds": 16.6
+    }
+  ]
+}

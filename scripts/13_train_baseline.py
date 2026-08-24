@@ -58,16 +58,22 @@ def load_split(path: Path, partitioned: bool, cfg, split, columns: list[str],
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dev-sample", action="store_true")
-    parser.add_argument("--resolution", type=int, default=None)
+    parser.add_argument("--spatial", default="h3", help="config overlay: h3 or s2")
+    parser.add_argument("--resolution", type=int, default=None,
+                        help="override the spatial resolution / S2 level")
     parser.add_argument("--train-sample-frac", type=float, default=None)
     parser.add_argument("--n-estimators", type=int, default=None)
     args = parser.parse_args()
 
-    cfg = load_config("h3", "lightgbm")
+    cfg = load_config(args.spatial, "lightgbm")
     if args.resolution is not None:
-        cfg = Config({**cfg, "spatial": {**cfg["spatial"], "resolution": args.resolution}})
+        key = "level" if cfg["spatial"].get("system") == "s2" else "resolution"
+        cfg = Config({**cfg, "spatial": {**cfg["spatial"], key: args.resolution,
+                                          "resolution": args.resolution}})
     log = get_logger("baseline", cfg)
-    tag = f"h3{cfg.dotted('spatial.resolution')}"
+    from src.spatial.h3_indexer import make_indexer as _mk
+    _idx = _mk(cfg)
+    tag = f"{_idx.name}{_idx.resolution}"
 
     problems = validate_splits(cfg)
     if problems:

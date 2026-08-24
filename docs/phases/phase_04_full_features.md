@@ -56,7 +56,7 @@ This directly answers "did traffic/events actually help, or were they not worth
 the extra pipeline complexity" - a real, defensible result either way.
 
 ## Definition of Done
-- [ ] Each feature family implemented and leakage-tested individually
-- [ ] Ablation table (A-H) generated and saved to `outputs/metrics/`
-- [ ] Final feature set decided based on ablation results, not assumption
-- [ ] `docs/STATUS.md` updated, phase committed to git
+- [x] Each feature family implemented and leakage-tested individually
+- [x] Ablation table (A-H) generated and saved to `outputs/metrics/`
+- [x] Final feature set decided based on ablation results, not assumption
+- [x] `docs/STATUS.md` updated, phase committed to git

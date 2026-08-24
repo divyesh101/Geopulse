@@ -78,15 +78,31 @@ def create_trip_regions_view(con: duckdb.DuckDBPyConnection, indexer, trips_view
     index_expr = indexer.sql_index_expr("lat", "lng")
     con.execute(
         f"""
-        CREATE OR REPLACE TABLE coord_regions AS
-        WITH coords AS (
-          SELECT DISTINCT start_lat AS lat, start_lng AS lng FROM {trips_view}
-          UNION
-          SELECT DISTINCT end_lat, end_lng FROM {trips_view}
-        )
-        SELECT lat, lng, {index_expr} AS region_id FROM coords
+        CREATE OR REPLACE TABLE coord_pairs AS
+        SELECT DISTINCT start_lat AS lat, start_lng AS lng FROM {trips_view}
+        UNION
+        SELECT DISTINCT end_lat, end_lng FROM {trips_view}
         """
     )
+    if index_expr is not None:
+        con.execute(
+            f"CREATE OR REPLACE TABLE coord_regions AS "
+            f"SELECT lat, lng, {index_expr} AS region_id FROM coord_pairs"
+        )
+    else:
+        # no in-database indexer (S2): index the few thousand distinct coordinates in
+        # Python and register the lookup. Same result, computed elsewhere.
+        import polars as pl
+
+        coords = pl.from_arrow(con.execute("SELECT lat, lng FROM coord_pairs").arrow())
+        coords = coords.with_columns(
+            pl.struct(["lat", "lng"])
+            .map_elements(lambda s: indexer.index(s["lat"], s["lng"]), return_dtype=pl.String)
+            .alias("region_id")
+        )
+        con.register("coord_regions_py", coords)
+        con.execute("CREATE OR REPLACE TABLE coord_regions AS SELECT * FROM coord_regions_py")
+        con.unregister("coord_regions_py")
     con.execute("CREATE UNIQUE INDEX IF NOT EXISTS coord_regions_pk ON coord_regions(lat, lng)")
     con.execute(
         f"""

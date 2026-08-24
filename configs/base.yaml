@@ -113,6 +113,36 @@ features:
   # Equals max(basic_lags), i.e. one week of warm-up.
   drop_warmup_rows: true
 
+advanced_features:
+  # Phase 4 families, added cumulatively by the A-H ablation.
+  # Windows are in interval_minutes steps: 4 = 1h, 12 = 3h, 24 = 6h, 96 = 1d, 672 = 1w.
+  rolling_windows: [4, 12, 24, 96, 672]
+  rolling_stats: [mean, std, sum]
+  ewm_spans: [4, 12, 96]          # 1h / 3h / 24h
+  trend_steps: [1, 2, 4]          # 15m / 30m / 1h change
+  netflow_windows: [4, 24]        # 1h / 6h rolling net flow
+  seasonal_slot_lags: {yesterday: 96, last_week: 672}
+  # Expanding seasonal expectation: mean demand for this region at this weekday and
+  # time-of-day slot, over PAST days only. min_periods guards a noisy first estimate.
+  expanding_min_periods: 3
+  neighbor_ring: 1
+  neighbor_stats: [sum, mean, max]
+  event_radius_km: 0.75           # an event counts for a region within this distance
+  event_recent_minutes: 60        # started within the last hour
+  event_ending_minutes: 60        # scheduled to end within the next hour
+  traffic_max_link_distance_km: 1.0
+  # DECIDED BY THE PHASE 4 ABLATION, not by assumption. A+B+C only:
+  #   B calendar_seasonal  +4.85%  the one family that clearly pays
+  #   C rolling_trend      +0.07%  marginal, kept (cheap, no external dependency)
+  #   D weather            -0.52%  no measurable benefit
+  #   E events             -0.01%  no effect (and 25% of events never geocoded)
+  #   F traffic            +0.01%  no effect (covers 5.1% of regions)
+  #   G spatial_neighbor   -0.06%  no benefit
+  #   H station_network    +0.02%  no effect
+  # Families D-H stay implemented and tested so the result is reproducible and the
+  # decision can be revisited at another resolution - they are simply not selected.
+  final_families: [A, B, C]
+
 seasonal_naive:
   # Named seasonal_naive, NOT baseline: configs/lightgbm.yaml already defines a
   # `baseline:` block for the untuned model params, and the two would deep-merge

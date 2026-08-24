@@ -1,9 +1,83 @@
 # STATUS
 
-**Current phase:** 3 - Minimal baseline (STOP-AND-VERIFY GATE) - **PASSED**
-**State:** Phase 1 gate 11/11, Phase 2 gate 11/11, Phase 3 gate 10/10,
-115 tests passing
-**Next phase:** 4 - Full feature engineering + the mandatory A-H ablation.
+**Current phase:** 4 - Full feature engineering + A-H ablation - **COMPLETE**
+**State:** Phase 1-3 gates green; Phase 4 ablation run, final feature set chosen.
+135 tests passing.
+**Next phase:** 5 - spatial representation experiments (H3 resolution, H3 vs S2).
+
+---
+
+## Phase 4 - Definition of Done (COMPLETE)
+
+- [x] Each feature family implemented and leakage-tested individually (20 new tests)
+- [x] Ablation table (A-H) generated -> `outputs/metrics/ablation_h39.parquet`
+- [x] Final feature set decided **by the ablation**, not by assumption
+- [x] `docs/STATUS.md` updated, phase committed to git
+
+### The ablation result
+
+168 features across 8 families, added cumulatively. Identical budget at every step:
+4,345,190 train rows / 2,177,044 validation rows / 300 rounds, h1 targets.
+
+| step | family | features | pickup MAE | dropoff MAE | mean dMAE | verdict |
+|---|---|---|---|---|---|---|
+| A | demand_recent | 21 | 0.7259 | 0.7208 | - | baseline |
+| B | + calendar_seasonal | 76 | **0.6901** | **0.6864** | **+4.85%** | **HELPS** |
+| C | + rolling_trend | 125 | 0.6889 | 0.6866 | +0.07% | marginal, kept |
+| D | + weather | 142 | 0.6926 | 0.6901 | -0.52% | no benefit |
+| E | + events | 148 | 0.6927 | 0.6902 | -0.01% | no effect |
+| F | + traffic | 155 | 0.6928 | 0.6899 | +0.01% | no effect |
+| G | + spatial_neighbor | 164 | 0.6930 | 0.6905 | -0.06% | no benefit |
+| H | + station_network | 168 | 0.6928 | 0.6905 | +0.02% | no effect |
+
+**Final feature set: A + B + C (125 features)**, recorded as
+`advanced_features.final_families` in `configs/base.yaml`.
+
+### What this answers
+
+The phase existed to settle "did traffic and events actually help, or were they not
+worth the pipeline complexity". The answer is unambiguous: **they did not**. Neither
+did weather, spatial-neighbour aggregates, or station/network context. Nearly all the
+signal beyond recent demand is **calendar and seasonality** - which is intuitive for
+commuter cycling, and cheap.
+
+Three caveats stated plainly, because they bound how far the result generalises:
+
+1. **"Hurts" should be read as "no measurable benefit", not "actively harmful".**
+   Every step gets the same 300 rounds, so adding 17 weather columns dilutes a fixed
+   capacity budget. A -0.5% move at that scale is capacity dilution, not evidence
+   that rain is anti-informative.
+2. **Traffic never had a fair chance on coverage.** After fixing link attribution to
+   use the whole polyline rather than the midpoint (18 -> 50 of 128 links), traffic
+   still reaches only **76 of 1,483 regions (5.1%)**. The feature is null for 95% of
+   rows, so the ablation is really measuring "traffic on 5% of Manhattan", not
+   "traffic".
+3. **Events carry a 25% geocoding hole.** 74.7% of event rows resolved; the rest are
+   free-text locations GeoSearch could not place, or were rejected by the borough
+   check. A better geocoder might change family E - though at +/-0.01% it would have
+   to change it a lot.
+
+Families D-H remain implemented, tested and reproducible. They are simply not
+selected, and the decision can be revisited at another resolution in Phase 5.
+
+### Phase 4 engineering notes
+
+**`forecast_time` is now pinned down** in `docs/FORECAST_TIME_CONVENTION.md`: it is
+the END of bin `ts`. That makes `h1` genuinely a 15-minute-ahead forecast (the other
+reading would make it 15-30 minutes, and every horizon label in the project would be
+off by one bin), and it makes the current bin's demand a legal input. Phase 3 omitted
+that lag-0 term, which is part of why its numbers were flagged as a floor.
+
+**A partitioned-write bug cost a rebuild.** polars' `write_parquet(partition_by=...)`
+names every file `00000000.parquet` and rewrites the directory, so each region batch
+silently replaced the previous one - only 35 of 1,483 regions survived. Writes now go
+through DuckDB with a per-batch `FILENAME_PATTERN`, and the script asserts that the
+row and region counts on disk match what was handed to the writer.
+
+**The ablation loader sampled after `collect()`**, materialising 86M rows x 175
+columns and running the machine out of memory. It now hashes `ts` inside the scan, so
+the filter pushes down - and because it samples **whole timestamps**, the full region
+cross-section survives at each retained instant, which Hotspot-F1 depends on.
 
 ---
 
