@@ -27,14 +27,14 @@ This is the most important phase to get right - everything later builds on it.
    pickups/dropoffs >= 0, exactly one row per active region per interval.
 
 ## Definition of Done
-- [ ] Seasonal Naive computed and reported (both variants, best one flagged)
-- [ ] 8 LightGBM models trained (pickup/dropoff x h1-h4), predictions clipped >= 0
-- [ ] LightGBM beats Seasonal Naive on validation MAE - if it doesn't, stop and
+- [x] Seasonal Naive computed and reported (both variants, best one flagged)
+- [x] 8 LightGBM models trained (pickup/dropoff x h1-h4), predictions clipped >= 0
+- [x] LightGBM beats Seasonal Naive on validation MAE - if it doesn't, stop and
       investigate before adding complexity, don't paper over it with more features
-- [ ] All leakage tests pass - treat any failure as a blocking bug, not a warning
-- [ ] All data validation tests pass
-- [ ] Verified on dev sample AND the full two-year (2023-2024) data
-- [ ] `docs/STATUS.md` updated, phase committed to git
+- [x] All leakage tests pass - treat any failure as a blocking bug, not a warning
+- [x] All data validation tests pass
+- [x] Verified on dev sample AND the full two-year (2023-2024) data
+- [x] `docs/STATUS.md` updated, phase committed to git
 
 ## Why this gate matters
 A sophisticated model on a leaky/broken dataset is worthless. Nothing in Phase 4

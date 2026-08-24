@@ -61,7 +61,7 @@ def main() -> int:
         trips_path = resolve_path(cfg, "paths.dev_sample") / "trips_clean.parquet"
         out_root = resolve_path(cfg, "paths.dev_sample", mkdir=True) / f"panel_{tag}.parquet"
         meta_root = resolve_path(cfg, "paths.dev_sample", mkdir=True)
-        lo, hi = dev_grid_bounds(cfg, warmup_days=0)
+        lo, hi = dev_grid_bounds(cfg, warmup_days=args.warmup_days)
         partition = False
     else:
         trips_path = resolve_path(cfg, "paths.interim") / "trips_clean.parquet"

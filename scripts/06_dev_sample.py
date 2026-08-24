@@ -71,14 +71,17 @@ def main() -> int:
     if not trips_src.exists():
         log.error("missing %s - run scripts/02_clean.py first", trips_src)
         return 1
+    # Trips carry the warm-up prefix too: the longest Phase 3 lag is one week, so a
+    # bare 7-day slice leaves every row with null lags and zero usable training rows.
     trips = (
         pl.scan_parquet(trips_src)
-        .filter((pl.col("started_at") >= start_utc) & (pl.col("started_at") < end_utc))
+        .filter((pl.col("started_at") >= warmup_utc) & (pl.col("started_at") < end_utc))
         .collect(engine="streaming")
     )
     trips.write_parquet(out_dir / "trips_clean.parquet", compression="zstd")
     manifest["trips_rows"] = trips.height
-    log.info("trips: %s rows -> %s", f"{trips.height:,}", out_dir / "trips_clean.parquet")
+    log.info("trips: %s rows (incl. %d warm-up days) -> %s", f"{trips.height:,}",
+             args.warmup_days, out_dir / "trips_clean.parquet")
 
     weather_src = external / "weather_hourly.parquet"
     if weather_src.exists():

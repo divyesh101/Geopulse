@@ -1,11 +1,78 @@
 # STATUS
 
-**Current phase:** 2 — Spatial indexing + demand panel — **COMPLETE**
-**State:** Phase 1 gate 11/11 (`scripts/09_phase1_check.py`),
-Phase 2 gate 11/11 (`scripts/11_phase2_check.py`), 100 tests passing
-**Next phase:** 3 — Minimal baseline (STOP-AND-VERIFY GATE). Seasonal Naive +
-a simple LightGBM per (target, horizon), plus the leakage and data-validation
-test suites. Nothing from Phase 4 starts until Phase 3 is boring and correct.
+**Current phase:** 3 - Minimal baseline (STOP-AND-VERIFY GATE) - **PASSED**
+**State:** Phase 1 gate 11/11, Phase 2 gate 11/11, Phase 3 gate 10/10,
+115 tests passing
+**Next phase:** 4 - Full feature engineering + the mandatory A-H ablation.
+
+---
+
+## Phase 3 - Definition of Done (STOP-AND-VERIFY GATE: PASSED)
+
+Verified by `scripts/14_phase3_check.py`.
+
+- [x] Seasonal Naive computed for both variants, best one flagged
+- [x] 8 LightGBM models trained (pickup/dropoff x h1-h4), predictions clipped >= 0
+- [x] **LightGBM beats Seasonal Naive on validation MAE on 8/8 targets**
+- [x] All leakage tests pass
+- [x] All data-validation tests pass
+- [x] Verified on the dev sample AND the full two-year data
+- [x] `docs/STATUS.md` updated, phase committed to git
+
+### Validation results (Sep-Oct 2024, 8,684,448 rows, TEST never touched)
+
+| target | naive MAE | LightGBM MAE | improvement | RMSE | WAPE | Hotspot F1 |
+|---|---|---|---|---|---|---|
+| pickup_h1 | 0.8768 | **0.6945** | 20.8% | 1.342 | 0.596 | 0.602 |
+| pickup_h2 | 0.8768 | **0.7013** | 20.0% | 1.364 | 0.602 | 0.600 |
+| pickup_h3 | 0.8768 | **0.7049** | 19.6% | 1.380 | 0.605 | 0.598 |
+| pickup_h4 | 0.8768 | **0.7076** | 19.3% | 1.388 | 0.608 | 0.598 |
+| dropoff_h1 | 0.8673 | **0.6920** | 20.2% | 1.340 | 0.594 | 0.595 |
+| dropoff_h2 | 0.8673 | **0.6984** | 19.5% | 1.364 | 0.600 | 0.592 |
+| dropoff_h3 | 0.8673 | **0.7035** | 18.9% | 1.381 | 0.604 | 0.590 |
+| dropoff_h4 | 0.8672 | **0.7072** | 18.5% | 1.394 | 0.607 | 0.589 |
+
+Seasonal Naive variants, mean MAE: `same_week` **0.872** beats `same_day` 0.899 -
+weekly seasonality dominates daily for bike demand, so `same_week` is the baseline.
+
+### Phase 3 decisions
+
+**The Seasonal Naive baseline is aligned correctly, which makes the gate harder.**
+The naive forecast for `t + h` is the value one season before *that* instant, i.e.
+`lag_{season - h}` - lag 95, not 96, for one-day seasonality at h=1. Those eight
+extra lag columns are materialised **for the baseline only** and kept out of
+`feature_columns`. Scoring the baseline off `lag_96` would have misaligned it by up
+to an hour and handed LightGBM an unearned win.
+
+**Features are basic on purpose.** 36 model inputs: 18 lags (1, 2, 4, 8, 12, 24, 96,
+192, 672 steps x pickups/dropoffs), 11 calendar, 6 cyclical, plus `region_id` as a
+categorical. Rolling, EWM, trend, seasonal-slot, weather, events, traffic and
+neighbour families are Phase 4 - the gate should measure a clean baseline, not a
+head start.
+
+**One week of warm-up is dropped per region.** The longest lag is 672 steps, so the
+first 672 rows of each region have null lags because there is no history, not
+because demand was zero. 1,483 x 672 = 996,576 rows removed, leaving 103,074,432.
+
+**Training subsamples; validation never does.** 104M rows x 36 features does not fit
+in 16 GB as a dense matrix, so TRAIN uses a uniform 25% sample (21,418,969 rows)
+while VALIDATION is scored in full (8,684,448 rows). Configurable via
+`train.train_sample_frac`; Phase 6 revisits it when tuning.
+
+**DST-flagged bins are excluded** (`train.exclude_dst_unreliable`), carrying the
+Phase 1/2 finding through instead of learning the artificial collapse.
+
+**Feature building is batched by region.** A single pass over 104M rows with 34 lag
+windows plus a global sort spilled 12 GB and threatened to exhaust the disk. Lags are
+`PARTITION BY region_id`, so batching by region is **exact** - 9 batches of ~12M rows
+finished in 6.4 min with 4 KB of spill. This also makes the Phase 5 sweep feasible.
+
+### Caveat to carry into Phase 6
+
+**Every model hit the 500-round cap without early stopping firing** (best_iteration
+500 for 7 of 8, 499 for one). The untuned baseline is still improving when it runs
+out of rounds, so these numbers are a floor, not LightGBM's ceiling. Phase 6 should
+raise `n_estimators` and let early stopping actually bind.
 
 ---
 
@@ -237,6 +304,10 @@ bare directory pattern matches at any depth. Now `/data/`.
 
 ## Running log
 
+- **2026-08-25** — Phase 3 gate PASSED. 103M-row feature table (36 model inputs)
+  built in region batches; Seasonal Naive (both variants) + 8 LightGBM models
+  trained; LightGBM beats the better naive on 8/8 targets by 18.5-20.8% MAE.
+  15 leakage tests re-derive every lag by independent timestamp join. 115 tests.
 - **2026-08-25** — Phase 2 complete. `SpatialIndexer` + `H3Indexer`, active-region
   selection, and the dense 104M-row panel with h1-h4 targets built and gated
   (11/11). Dev sample verified before the full range. Gate and tests green.

@@ -103,6 +103,33 @@ weather:
   high_wind_kmh: 30.0
   ffill_max_hours: 3
 
+features:
+  # Phase 3 keeps ONLY basic lags. Rolling / seasonal-slot / trend features are
+  # deliberately deferred to Phase 4 so the gate measures a clean baseline.
+  # Units are interval_minutes steps: 4 = 1h, 96 = 1 day, 672 = 1 week.
+  basic_lags: [1, 2, 4, 8, 12, 24, 96, 192, 672]
+  lag_targets: [pickups, dropoffs]
+  # Rows before this many steps of history have null lags and cannot be trained on.
+  # Equals max(basic_lags), i.e. one week of warm-up.
+  drop_warmup_rows: true
+
+seasonal_naive:
+  # Named seasonal_naive, NOT baseline: configs/lightgbm.yaml already defines a
+  # `baseline:` block for the untuned model params, and the two would deep-merge
+  # into one dict - feeding seasonal_naive_lags to LightGBM as a hyperparameter.
+  # Prediction = demand at the same slot one day / one week ago. Both are computed;
+  # the better one on VALIDATION is the baseline LightGBM must beat.
+  seasonal_naive_lags: {same_day: 96, same_week: 672}
+
+train:
+  # 104M panel rows x ~36 features does not fit in 16 GB as a dense matrix. The
+  # baseline trains on a uniform random subsample of TRAIN rows; VALIDATION and
+  # TEST are always evaluated in full so the reported metrics are honest.
+  # Phase 6 revisits this when tuning.
+  train_sample_frac: 0.25
+  sample_seed: 42
+  exclude_dst_unreliable: true   # Phase 1/2 flagged these bins as not real demand
+
 events:
   # Rows whose end precedes their start are data errors and are dropped (counted).
   drop_end_before_start: true

@@ -2,7 +2,7 @@ PY := python
 export PYTHONUTF8 := 1
 export PYTHONIOENCODING := utf-8
 
-.PHONY: help ingest clean weather events registry traffic trafficclean devsample \n        panel paneldev phase1 phase1check phase2 phase2check test
+.PHONY: help ingest clean weather events registry traffic trafficclean devsample \n        panel paneldev features featuresdev baseline baselinedev \n        phase1 phase1check phase2 phase2check phase3 phase3check test
 
 help:
 	@echo "make ingest     - raw Citi Bike CSV -> typed UTC parquet (data/raw/trips)"
@@ -19,6 +19,10 @@ help:
 	@echo "make phase1check- verify the Phase 1 Definition of Done"
 	@echo "make phase2     - build the panel (Phase 2)"
 	@echo "make phase2check- verify the Phase 2 Definition of Done"
+	@echo "make features   - panel -> model-ready feature table (Phase 3)"
+	@echo "make baseline   - Seasonal Naive + 8 LightGBM models"
+	@echo "make phase3     - features + baseline (the STOP-AND-VERIFY gate)"
+	@echo "make phase3check- verify the Phase 3 Definition of Done"
 	@echo "make test       - run pytest"
 
 ingest:
@@ -60,6 +64,23 @@ phase2: paneldev panel
 
 phase2check:
 	$(PY) scripts/11_phase2_check.py
+
+features:
+	$(PY) scripts/12_build_features.py
+
+featuresdev:
+	$(PY) scripts/12_build_features.py --dev-sample
+
+baseline:
+	$(PY) scripts/13_train_baseline.py
+
+baselinedev:
+	$(PY) scripts/13_train_baseline.py --dev-sample
+
+phase3: featuresdev baselinedev features baseline
+
+phase3check:
+	$(PY) scripts/14_phase3_check.py
 
 test:
 	$(PY) -m pytest tests -q
