@@ -211,7 +211,7 @@ def main() -> int:
         metrics = all_metrics(y_valid[target], prediction)
         results.append({"model": "lightgbm_final", "target": target, "split": "validate",
                         **metrics, **hotspot_f1(y_valid[target], prediction, valid_ts),
-                        "best_iteration": booster.best_iteration or booster.num_trees(),
+                        "best_iteration": (booster.best_iteration if booster.best_iteration and booster.best_iteration > 0 else booster.num_trees()),
                         "reused": reused,
                         "train_seconds": round(time.perf_counter() - t0, 1)})
         if not reused:
@@ -219,7 +219,7 @@ def main() -> int:
         importance = booster.feature_importance("gain")
         top = sorted(zip(inputs, importance), key=lambda kv: -kv[1])[:15]
         log.info("%-12s MAE=%.4f iters=%-4d %.0fs%s | top: %s", target, metrics["mae"],
-                 booster.best_iteration or booster.num_trees(),
+                 (booster.best_iteration if booster.best_iteration and booster.best_iteration > 0 else booster.num_trees()),
                  results[-1]["train_seconds"], " (reused)" if reused else "",
                  ", ".join(name for name, _ in top[:5]))
         if target == "pickup_h1":

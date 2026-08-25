@@ -2,7 +2,7 @@
 
 **Current phase:** 8 - Operations - **COMPLETE**
 **State:** All eight phases done. TEST was opened exactly once, in Phase 7.
-146 tests green.
+146 tests: 145 passing, 1 skipped.
 
 **The four research questions, answered:**
 
@@ -10,7 +10,7 @@
 |---|---|---|
 | 1 | which H3 resolution? | **H3-8**, chosen on skill vs Seasonal Naive - the only metric that survives a change of cell size |
 | 2 | H3 or S2? | **near coin-flip.** S2-13 edges H3-8 on skill (0.274 vs 0.256) but its cells are 47% larger; resolution matters, the tiling scheme barely does |
-| 3 | do TFT/ST-GNN beat tuned LightGBM? | **not on MAE** - but TFT wins WAPE and ST-GNN wins Hotspot-F1, and both deep models were stopped undertrained at 8 epochs |
+| 3 | do TFT/ST-GNN beat tuned LightGBM? | **no.** LightGBM leads at both resolutions; TFT's WAPE and ST-GNN's Hotspot-F1 edges at H3-8 both reverse at S2-13. Caveat: the deep models were stopped undertrained at 8 epochs |
 | 4 | do better forecasts improve operations? | **yes among forecasts, no in absolute terms** - LightGBM beats even perfect foresight by moving less, but rebalancing itself does not pay at region granularity |
 
 ---
@@ -179,6 +179,45 @@ Degradation with horizon is mild and monotone: LightGBM pickup MAE runs
 1.1408 (h1) -> 1.1696 (h2) -> 1.2088 (h4), i.e. a one-hour forecast is only 6%
 worse than a 15-minute one.
 
+### Model comparison on TEST, S2-13 (1,350,888 rows)
+
+| model | pickup h1 MAE | RMSE | WAPE | Hotspot F1 |
+|---|---|---|---|---|
+| **LightGBM (tuned)** | **1.3777** | 2.6385 | **0.3105** | **0.7485** |
+| TFT | 1.4762 | 3.0362 | 0.3569 | - |
+| ST-GNN | 1.4817 | 2.9806 | 0.3269 | 0.7449 |
+| Seasonal Naive (same day) | 2.3458 | 5.3872 | 0.5286 | 0.6568 |
+| Seasonal Naive (same week) | 2.5046 | 5.7625 | 0.5644 | 0.6693 |
+
+### The six-config matrix, on skill vs Seasonal Naive
+
+Raw MAE is not comparable across spatial systems - S2-13 cells are 47% larger than
+H3-8's, so their counts are larger and every absolute error with them. Skill
+(`1 - model_MAE / naive_MAE`, both measured on the same grid) divides that out.
+
+| config | MAE | WAPE | Hotspot F1 | **skill vs naive** |
+|---|---|---|---|---|
+| **LightGBM @ S2-13** | 1.3777 | 0.3105 | 0.7485 | **0.4127** |
+| LightGBM @ H3-8 | 1.1408 | 0.3573 | 0.7248 | 0.3810 |
+| TFT @ S2-13 | 1.4762 | 0.3569 | - | 0.3707 |
+| ST-GNN @ S2-13 | 1.4817 | 0.3269 | 0.7449 | 0.3683 |
+| ST-GNN @ H3-8 | 1.2024 | 0.3686 | 0.7260 | 0.3476 |
+| TFT @ H3-8 | 1.2919 | 0.3523 | - | 0.2990 |
+
+**LightGBM is first at both resolutions, and the S2-13 ordering confirms Phase 5's
+RQ2 result independently**: S2-13 scores higher skill than H3-8 for all three model
+families, exactly as the Phase 5 LightGBM-only sweep predicted (0.274 vs 0.256).
+Note this is *skill*, not accuracy - H3-8 still has the lower raw MAE, and the
+Phase 5 caveat stands: S2-13's cells remain 47% coarser, which plausibly accounts
+for the whole margin.
+
+**The deep models' two wins at H3-8 do not replicate at S2-13.** TFT's WAPE
+advantage (0.3523 vs LightGBM's 0.3573 at H3-8) reverses at S2-13 (0.3569 vs
+0.3105), and ST-GNN's Hotspot-F1 edge (0.7260 vs 0.7248) likewise reverses (0.7449
+vs 0.7485). Two thin wins that vanish under a change of spatial system are better
+read as noise than as architecture effects - which is the main reason the RQ3
+answer below is stated as "not on MAE" rather than as a split decision.
+
 ### RQ3 - do TFT and ST-GNN beat a tuned LightGBM?
 
 **No, not on MAE - but the answer is more interesting than the headline, and it
@@ -187,14 +226,14 @@ comes with a real caveat.**
 1. **LightGBM wins absolute error at every horizon and both targets.** All three
    models beat both Seasonal Naive variants by 35-42%, so every one of them is a
    genuine model rather than a dressed-up persistence rule.
-2. **TFT wins WAPE while losing MAE** (0.3523 vs 0.3573 at pickup h1; 0.3468 vs
-   0.3663 at h2). WAPE weights by volume, so this says TFT is *better on the busy
-   cells that matter operationally* and worse across the mass of near-empty ones.
-   Reporting only MAE would have hidden that.
-3. **ST-GNN edges LightGBM on Hotspot-F1 at h1** (0.7260 vs 0.7248). Hotspot-F1
-   ranks regions against each other at each timestamp - precisely the comparison
-   the graph adjacency exists to inform. The margin is thin, but it lands where
-   the architecture predicts it should.
+2. **At H3-8 only, TFT wins WAPE while losing MAE** (0.3523 vs 0.3573 at pickup
+   h1), and **ST-GNN edges Hotspot-F1** (0.7260 vs 0.7248). Both land where their
+   architectures predict - WAPE weights by volume, Hotspot-F1 ranks regions against
+   each other, which is what the graph adjacency exists to inform.
+3. **But neither win replicates at S2-13**, where LightGBM takes MAE, WAPE and
+   Hotspot-F1 outright. Two sub-1% margins that flip under a change of tiling scheme
+   are noise, not evidence. They are reported because suppressing them would be
+   selective, not because they support a claim.
 
 **The caveat, stated plainly: the deep models are undertrained.** Both were stopped
 at 8 epochs on Kaggle and *both were still improving monotonically on the final
@@ -708,7 +747,7 @@ bare directory pattern matches at any depth. Now `/data/`.
   trained on a Kaggle T4. TEST opened once: LightGBM wins MAE, TFT wins WAPE, ST-GNN
   wins Hotspot-F1. Phase 8 found rebalancing does not pay at region granularity, and
   that LightGBM out-rebalances perfect foresight by moving less. Standardized
-  `predict()` interface added with 10 tests. 146 tests green.
+  `predict()` interface added with 10 tests. 146 tests, 145 passing.
 - **2026-08-25** — Phase 3 gate PASSED. 103M-row feature table (36 model inputs)
   built in region batches; Seasonal Naive (both variants) + 8 LightGBM models
   trained; LightGBM beats the better naive on 8/8 targets by 18.5-20.8% MAE.
