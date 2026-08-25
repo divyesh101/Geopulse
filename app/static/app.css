@@ -30,6 +30,9 @@
   --sheet-expanded: min(78vh, 700px);
 }
 
+/* Dark is declared twice on purpose: once for the OS preference (unless the chosen
+   basemap has forced light), and once for an explicit choice, so picking a dark
+   basemap under a light OS still flips the panel with it. */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --bg: #0e1215;
@@ -51,6 +54,27 @@
     --shadow: 0 2px 6px rgba(0,0,0,.4), 0 14px 40px rgba(0,0,0,.5);
     --shadow-sm: 0 1px 3px rgba(0,0,0,.4), 0 4px 14px rgba(0,0,0,.3);
   }
+}
+
+:root[data-theme="dark"] {
+    --bg: #0e1215;
+    --surface: #171d21;
+    --surface-2: #1f272c;
+    --ink: #eef2f4;
+    --ink-2: #a3b0b8;
+    --ink-3: #74838c;
+    --line: #2a343a;
+    --brand: #2fbc8d;
+    --brand-ink: #06231a;
+    --brand-soft: #14312a;
+    --hot: #ff8747;
+    --hot-soft: #35211a;
+    --warn: #e0a94a;
+    --warn-soft: #322817;
+    --cool: #6ea8ff;
+    --cool-soft: #16233a;
+    --shadow: 0 2px 6px rgba(0,0,0,.4), 0 14px 40px rgba(0,0,0,.5);
+    --shadow-sm: 0 1px 3px rgba(0,0,0,.4), 0 4px 14px rgba(0,0,0,.3);
 }
 
 * { box-sizing: border-box; }
@@ -403,3 +427,37 @@ body.expanded .legend { bottom: calc(var(--sheet-expanded) + 16px); }
 .route-card.unreachable .route-eyebrow { color: var(--warn); }
 .route-card.unreachable .route-eta { background: var(--warn); color: #fff; }
 .route-smart.warn { background: var(--warn-soft); color: var(--warn); }
+
+/* ── basemap switcher ───────────────────────────────────────────── */
+.mapstyle { position: fixed; z-index: 16; right: 14px; top: 84px; }
+.mapstyle-toggle {
+  width: 40px; height: 40px; border-radius: var(--r-sm);
+  border: 1px solid var(--line); background: var(--surface);
+  box-shadow: var(--shadow-sm); cursor: pointer;
+  display: grid; place-items: center;
+}
+.mapstyle-toggle svg {
+  width: 19px; height: 19px; fill: none; stroke: var(--ink-2);
+  stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round;
+}
+.mapstyle-toggle[aria-expanded="true"] { border-color: var(--brand); }
+.mapstyle-toggle[aria-expanded="true"] svg { stroke: var(--brand); }
+
+.mapstyle-list {
+  position: absolute; right: 0; top: 46px; width: 216px;
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--r-md); box-shadow: var(--shadow); overflow: hidden;
+}
+.mapstyle-list button {
+  display: flex; flex-direction: column; gap: 2px; width: 100%;
+  padding: 10px 13px; border: 0; background: transparent;
+  text-align: left; cursor: pointer; border-bottom: 1px solid var(--line);
+}
+.mapstyle-list button:last-child { border-bottom: 0; }
+.mapstyle-list button:hover { background: var(--surface-2); }
+.mapstyle-list button[aria-pressed="true"] { background: var(--brand-soft); }
+.mapstyle-list button[aria-pressed="true"] .ms-name { color: var(--brand); }
+.ms-name { font-size: 13px; font-weight: 700; }
+.ms-detail { font-size: 10.5px; color: var(--ink-3); line-height: 1.35; }
+
+@media (max-width: 480px) { .mapstyle { top: 78px; } }

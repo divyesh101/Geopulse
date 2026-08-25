@@ -18,6 +18,7 @@ before starting - never in the repo:
 from __future__ import annotations
 
 import functools
+import os
 import sys
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -45,6 +46,51 @@ GRIDS = [
     {"id": "s2-13", "spatial": "s2", "resolution": 13, "label": "S2 · level 13",
      "detail": "231 quadrilaterals, ~1.09 km² · matched to H3-8"},
 ]
+
+
+def basemaps() -> list[dict]:
+    """Vector basemaps, keyless first.
+
+    Vector rather than raster matters here for a specific reason: with a vector
+    style the choropleth can be inserted *beneath* the label layers, so street and
+    place names stay readable on top of it. Raster tiles are a single flat image -
+    anything we draw necessarily covers the labels.
+
+    The keyless providers are genuinely free and need no signup. The keyed ones only
+    appear if the corresponding environment variable is set, so nothing here breaks
+    on a fresh clone.
+    """
+    styles = [
+        {"id": "liberty", "label": "Streets",
+         "url": "https://tiles.openfreemap.org/styles/liberty",
+         "theme": "light", "detail": "OpenFreeMap · full detail, no key"},
+        {"id": "positron", "label": "Clean",
+         "url": "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json",
+         "theme": "light", "detail": "CARTO Positron · muted, data-first"},
+        {"id": "voyager", "label": "Colour",
+         "url": "https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json",
+         "theme": "light", "detail": "CARTO Voyager"},
+        {"id": "dark-matter", "label": "Dark",
+         "url": "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
+         "theme": "dark", "detail": "CARTO Dark Matter"},
+    ]
+    maptiler = os.environ.get("MAPTILER_KEY")
+    if maptiler:
+        styles += [
+            {"id": "maptiler-streets", "label": "MapTiler",
+             "url": f"https://api.maptiler.com/maps/streets-v2/style.json?key={maptiler}",
+             "theme": "light", "detail": "MapTiler Streets v2"},
+            {"id": "maptiler-dataviz", "label": "Dataviz",
+             "url": f"https://api.maptiler.com/maps/dataviz/style.json?key={maptiler}",
+             "theme": "light", "detail": "MapTiler Dataviz · built for overlays"},
+        ]
+    stadia = os.environ.get("STADIA_KEY")
+    if stadia:
+        styles.append(
+            {"id": "stadia-smooth", "label": "Alidade",
+             "url": f"https://tiles.stadiamaps.com/styles/alidade_smooth.json?api_key={stadia}",
+             "theme": "light", "detail": "Stadia Alidade Smooth"})
+    return styles
 
 
 @functools.lru_cache(maxsize=1)
@@ -89,6 +135,7 @@ def config() -> dict:
 
     return {
         "grids": GRIDS,
+        "basemaps": basemaps(),
         "models": [{"id": name, "label": MODEL_LABELS.get(name, name)}
                    for name in engine.available_models()],
         "horizons": [{"value": h, "label": f"{h * engine.interval} min"}

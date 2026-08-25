@@ -16,23 +16,27 @@ const state = {
 };
 
 /* ── map ─────────────────────────────────────────────────────────── */
-const dark = matchMedia("(prefers-color-scheme: dark)").matches;
-const tiles = dark
-  ? "https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
-  : "https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png";
+/* Vector basemaps, not raster. The reason is concrete: with a vector style the
+   choropleth can be inserted *beneath* the label layers, so street and place names
+   stay legible on top of the data. A raster basemap is one flat image, so anything
+   drawn over it necessarily buries the labels. */
+
+const prefersDark = matchMedia("(prefers-color-scheme: dark)").matches;
+
+/** Palette derived from the active basemap's own theme, not the OS, so a dark
+ *  basemap under a light OS still gets readable overlay colours. */
+let theme = prefersDark ? "dark" : "light";
+const palette = () => (theme === "dark"
+  ? { cell0: "#1b2b26", cell1: "#22513f", accent: "#54e3b3", route: "#7ef0c8",
+      focus: "#54e3b3" }
+  : { cell0: "#dbe7e2", cell1: "#b9dccd", accent: "#0b7a5a", route: "#0b7a5a",
+      focus: "#0b7a5a" });
 
 const map = new maplibregl.Map({
   container: "map",
-  style: {
-    version: 8,
-    sources: {
-      base: {
-        type: "raster", tiles: [tiles], tileSize: 256,
-        attribution: '&copy; <a href="https://openstreetmap.org">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
-      },
-    },
-    layers: [{ id: "base", type: "raster", source: "base" }],
-  },
+  style: prefersDark
+    ? "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json"
+    : "https://tiles.openfreemap.org/styles/liberty",
   center: [-73.978, 40.745],
   zoom: 11.7,
   attributionControl: { compact: true },
@@ -40,87 +44,86 @@ const map = new maplibregl.Map({
 map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "bottom-right");
 
 let marker = null;
+let geometry = { type: "FeatureCollection", features: [] };
+let routeData = null;
+let blinkRegion = null;
 
-map.on("load", async () => {
-  map.addSource("cells", { type: "geojson", data: emptyFC() });
+/** The id of the first symbol layer, so overlays slot in underneath the labels. */
+function firstSymbolLayer() {
+  const layers = (map.getStyle() && map.getStyle().layers) || [];
+  const symbol = layers.find((l) => l.type === "symbol");
+  return symbol ? symbol.id : undefined;
+}
+
+/** Every source and layer this app owns. Re-runnable: setStyle() wipes the style,
+ *  taking custom layers with it, so this is called again after each switch. */
+function addOverlays() {
+  const c = palette();
+  const under = firstSymbolLayer();
+  if (map.getSource("cells")) return;
+
+  map.addSource("cells", { type: "geojson", data: geometry });
   map.addLayer({
     id: "cells-fill", type: "fill", source: "cells",
+    // `pickups` is a 0-4 log-scaled index, not a raw count (see refresh()): a few
+    // Midtown cells carry most of the demand, so a linear ramp would render the
+    // rest of the city as one flat colour
     paint: {
-      // `pickups` is a 0-4 log-scaled index, not a raw count (see refresh()):
-      // a few Midtown cells carry most of the demand, so a linear ramp would
-      // render the rest of the city as one flat colour
       "fill-color": [
         "interpolate", ["linear"], ["coalesce", ["get", "pickups"], 0],
-        0, dark ? "#1b2b26" : "#dbe7e2",
-        0.8, dark ? "#22513f" : "#b9dccd",
-        1.8, "#86c9ae",
-        2.6, "#2fbc8d",
-        3.3, "#f2a65a",
-        4, "#e8590c",
+        0, c.cell0, 0.8, c.cell1, 1.8, "#86c9ae",
+        2.6, "#2fbc8d", 3.3, "#f2a65a", 4, "#e8590c",
       ],
-      "fill-opacity": ["case", ["boolean", ["feature-state", "hover"], false], 0.82, 0.6],
+      "fill-opacity": 0.55,
     },
-  });
+  }, under);
   map.addLayer({
     id: "cells-line", type: "line", source: "cells",
-    paint: { "line-color": dark ? "#2fbc8d" : "#0b7a5a", "line-width": 0.35, "line-opacity": 0.5 },
-  });
-  // the focused cell pulses translucently rather than switching to a solid fill,
-  // so the basemap underneath stays readable while the eye is drawn to it
+    paint: { "line-color": c.accent, "line-width": 0.4, "line-opacity": 0.45 },
+  }, under);
+  // the focused cell pulses translucently rather than filling solid, so the
+  // streets underneath stay readable while the eye is drawn to it
   map.addLayer({
     id: "cells-blink", type: "fill", source: "cells",
     filter: ["==", ["get", "region_id"], "__none__"],
-    paint: { "fill-color": dark ? "#54e3b3" : "#0b7a5a", "fill-opacity": 0.2 },
-  });
+    paint: { "fill-color": c.focus, "fill-opacity": 0.2 },
+  }, under);
   map.addLayer({
     id: "cells-focus", type: "line", source: "cells",
     filter: ["==", ["get", "region_id"], "__none__"],
-    paint: {
-      "line-color": dark ? "#54e3b3" : "#0b7a5a",
-      "line-width": 2.6, "line-opacity": 0.9,
-    },
-  });
+    paint: { "line-color": c.focus, "line-width": 2.6, "line-opacity": 0.9 },
+  }, under);
 
-  // route: a soft wide glow under a bright dashed line, so the path reads over
-  // both the light and dark basemaps
   map.addSource("route", { type: "geojson", data: emptyFC() });
   map.addLayer({
     id: "route-glow", type: "line", source: "route",
     layout: { "line-cap": "round", "line-join": "round" },
-    paint: {
-      "line-color": dark ? "#54e3b3" : "#0b7a5a",
-      "line-width": 15, "line-opacity": 0.18, "line-blur": 10,
-    },
-  });
+    paint: { "line-color": c.route, "line-width": 16, "line-opacity": 0.2, "line-blur": 11 },
+  }, under);
   map.addLayer({
     id: "route-line", type: "line", source: "route",
     layout: { "line-cap": "round", "line-join": "round" },
-    paint: {
-      "line-color": dark ? "#7ef0c8" : "#0b7a5a",
-      "line-width": 5, "line-opacity": 0.95,
-    },
-  });
+    paint: { "line-color": c.route, "line-width": 5.5, "line-opacity": 0.95 },
+  }, under);
   map.addLayer({
     id: "route-dash", type: "line", source: "route",
     layout: { "line-cap": "butt", "line-join": "round" },
     paint: {
-      "line-color": "#ffffff", "line-width": 2.4, "line-opacity": 0.9,
-      "line-dasharray": [0, 4, 3],
+      "line-color": theme === "dark" ? "#06231a" : "#ffffff",
+      "line-width": 2.4, "line-opacity": 0.9, "line-dasharray": [0, 4, 3],
     },
-  });
+  }, under);
   map.addSource("route-points", { type: "geojson", data: emptyFC() });
   map.addLayer({
     id: "route-points", type: "circle", source: "route-points",
     paint: {
       "circle-radius": ["case", ["==", ["get", "kind"], "target"], 8, 5],
-      "circle-color": ["case", ["==", ["get", "kind"], "target"],
-        dark ? "#7ef0c8" : "#0b7a5a", "#ffffff"],
+      "circle-color": ["case", ["==", ["get", "kind"], "target"], c.route, "#ffffff"],
       "circle-stroke-width": 2.5,
       "circle-stroke-color": ["case", ["==", ["get", "kind"], "target"],
-        "#ffffff", dark ? "#7ef0c8" : "#0b7a5a"],
+        theme === "dark" ? "#06231a" : "#ffffff", c.route],
     },
-  });
-  animateDash();
+  }, under);
 
   map.on("click", "cells-fill", (e) => {
     const f = e.features[0];
@@ -129,7 +132,24 @@ map.on("load", async () => {
   });
   map.on("mouseenter", "cells-fill", () => (map.getCanvas().style.cursor = "pointer"));
   map.on("mouseleave", "cells-fill", () => (map.getCanvas().style.cursor = ""));
+}
 
+/** Switch basemap without losing what is drawn on top of it. */
+function setBasemap(style) {
+  theme = style.theme;
+  document.documentElement.setAttribute("data-theme", style.theme);
+  map.setStyle(style.url);
+  map.once("styledata", () => {
+    addOverlays();
+    if (map.getSource("cells")) map.getSource("cells").setData(geometry);
+    if (routeData) drawRoute(routeData, false);
+    if (blinkRegion) startBlink(blinkRegion);
+  });
+}
+
+map.on("load", async () => {
+  addOverlays();
+  animateDash();
   await boot();
 });
 
@@ -159,6 +179,7 @@ function animateDash() {
 let blinkFrame = null;
 function startBlink(regionId) {
   stopBlink();
+  blinkRegion = regionId;
   if (!regionId || !map.getLayer("cells-blink")) return;
   map.setFilter("cells-blink", ["==", ["get", "region_id"], regionId]);
   map.setFilter("cells-focus", ["==", ["get", "region_id"], regionId]);
@@ -176,6 +197,15 @@ function startBlink(regionId) {
 function stopBlink() {
   if (blinkFrame) cancelAnimationFrame(blinkFrame);
   blinkFrame = null;
+}
+
+function clearFocus() {
+  stopBlink();
+  blinkRegion = null;
+  if (map.getLayer("cells-blink")) {
+    map.setFilter("cells-blink", ["==", ["get", "region_id"], "__none__"]);
+    map.setFilter("cells-focus", ["==", ["get", "region_id"], "__none__"]);
+  }
 }
 
 /** Google-style approach: pull back, travel, then settle in.
@@ -208,8 +238,9 @@ function sheetHeight() {
 }
 
 /** Draw the A* path and frame it. */
-function drawRoute(route) {
-  if (!route || !route.ok) return;
+function drawRoute(route, frame = true) {
+  if (!route || !route.ok || !map.getSource("route")) return;
+  routeData = route;
   const coords = route.geometry.coordinates;
   map.getSource("route").setData({
     type: "FeatureCollection",
@@ -226,6 +257,7 @@ function drawRoute(route) {
 
   const lngs = coords.map((c) => c[0]);
   const lats = coords.map((c) => c[1]);
+  if (!frame) return;
   const bounds = [[Math.min(...lngs), Math.min(...lats)],
     [Math.max(...lngs), Math.max(...lats)]];
   // pull back first so the whole path enters frame from a wider view
@@ -237,6 +269,7 @@ function drawRoute(route) {
 }
 
 function clearRoute() {
+  routeData = null;
   if (!map.getSource("route")) return;
   map.getSource("route").setData(emptyFC());
   map.getSource("route-points").setData(emptyFC());
@@ -268,6 +301,8 @@ async function boot() {
     refresh();
   });
 
+  renderBasemaps(cfg.basemaps || []);
+
   $("mode-text").textContent = cfg.assistant_mode;
   $("mode-badge").title = cfg.assistant_model
     ? `Assistant: ${cfg.assistant_mode} (${cfg.assistant_model})`
@@ -298,6 +333,43 @@ function renderChips(containerId, items, get, set) {
   });
 }
 
+function renderBasemaps(styles) {
+  if (!styles.length) return;
+  const list = $("mapstyle-list");
+  // start on whichever style matches the OS preference, which is what the map
+  // was constructed with
+  let current = styles.find((s) => s.theme === theme) || styles[0];
+  list.innerHTML = "";
+  styles.forEach((style) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.innerHTML = `<span class="ms-name"></span><span class="ms-detail"></span>`;
+    b.querySelector(".ms-name").textContent = style.label;
+    b.querySelector(".ms-detail").textContent = style.detail;
+    b.setAttribute("aria-pressed", String(style.id === current.id));
+    b.addEventListener("click", () => {
+      current = style;
+      setBasemap(style);
+      [...list.children].forEach((c) => c.setAttribute("aria-pressed", String(c === b)));
+      list.hidden = true;
+      $("mapstyle-toggle").setAttribute("aria-expanded", "false");
+    });
+    list.appendChild(b);
+  });
+  $("mapstyle-toggle").addEventListener("click", (e) => {
+    e.stopPropagation();
+    const open = list.hidden;
+    list.hidden = !open;
+    $("mapstyle-toggle").setAttribute("aria-expanded", String(open));
+  });
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest(".mapstyle")) {
+      list.hidden = true;
+      $("mapstyle-toggle").setAttribute("aria-expanded", "false");
+    }
+  });
+}
+
 function showNotice(text) {
   const el = $("notice");
   el.textContent = text || "";
@@ -305,8 +377,6 @@ function showNotice(text) {
 }
 
 /* ── data ────────────────────────────────────────────────────────── */
-let geometry = emptyFC();
-
 async function loadGeometry() {
   geometry = await fetch(`/api/geojson?grid=${state.grid}`).then((r) => r.json());
 }
@@ -331,7 +401,7 @@ async function refresh() {
     f.properties.pickups = v > 0 ? Math.log1p(v) / Math.log1p(max) * 4 : 0;
     f.properties.raw = v;
   });
-  map.getSource("cells").setData(geometry);
+  if (map.getSource("cells")) map.getSource("cells").setData(geometry);
 
   if (!state.place) {
     $("sheet-sub").textContent =
@@ -529,9 +599,7 @@ $("place-clear").addEventListener("click", () => {
   state.place = null;
   $("sheet-place").textContent = "NYC overview";
   $("cards").innerHTML = "";
-  stopBlink();
-  map.setFilter("cells-blink", ["==", ["get", "region_id"], "__none__"]);
-  map.setFilter("cells-focus", ["==", ["get", "region_id"], "__none__"]);
+  clearFocus();
   clearRoute();
   if (marker) { marker.remove(); marker = null; }
   refresh();
