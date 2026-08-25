@@ -37,10 +37,10 @@ geopulse/
    verified here first, before running on the full two years.
 
 ## Definition of Done
-- [ ] Repo structure + configs exist, nothing hardcoded that should be configurable
-- [ ] Data quality report generated and saved to `outputs/`
-- [ ] Cleaning removes/flags issues with logged counts per rule (no silent drops)
-- [ ] Timestamps correctly localized, DST verified around all four transitions in 2023-2024
-- [ ] Station registry built, coordinate anomalies flagged
-- [ ] 7-day dev sample exists and is used for the next phase's first pass
-- [ ] `docs/STATUS.md` updated, phase committed to git
+- [x] Repo structure + configs exist, nothing hardcoded that should be configurable
+- [x] Data quality report generated and saved to `outputs/`
+- [x] Cleaning removes/flags issues with logged counts per rule (no silent drops)
+- [x] Timestamps correctly localized, DST verified around all four transitions in 2023-2024
+- [x] Station registry built, coordinate anomalies flagged
+- [x] 7-day dev sample exists and is used for the next phase's first pass
+- [x] `docs/STATUS.md` updated, phase committed to git
