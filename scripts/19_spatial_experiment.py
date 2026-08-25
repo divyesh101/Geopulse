@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.evaluation.metrics import all_metrics, hotspot_f1  # noqa: E402
 from src.features.basic import feature_columns  # noqa: E402
+from src.models import baseline  # noqa: E402
 from src.models.splits import load_splits  # noqa: E402
 from src.utils.config import Config, load_config, resolve_path  # noqa: E402
 from src.utils.logging_utils import get_logger  # noqa: E402
@@ -71,6 +72,12 @@ def train_and_score(cfg, tag: str, log, train_frac: float, valid_frac: float,
     features_path = resolve_path(cfg, "paths.processed") / f"features_{tag}"
     splits = load_splits(cfg)
     model_features = feature_columns(cfg)
+    naive_cols = [
+        baseline.lag_column_for("pickups" if t.startswith("pickup") else "dropoffs",
+                                baseline.seasonal_lag_steps(cfg)["same_week"],
+                                int(t.partition("_h")[2]))
+        for t in TARGETS
+    ]
     tz = cfg.dotted("time.timezone")
     seed = cfg.dotted("train.sample_seed")
 
@@ -79,7 +86,7 @@ def train_and_score(cfg, tag: str, log, train_frac: float, valid_frac: float,
         local_date = pl.col("ts").dt.convert_time_zone(tz).dt.date()
         scan = scan.filter((local_date >= split.start) & (local_date <= split.end))
         scan = scan.filter(~pl.col("dst_unreliable"))
-        frame = scan.select(sorted(set(["ts", *model_features, *TARGETS]))).collect(
+        frame = scan.select(sorted(set(["ts", *model_features, *TARGETS, *naive_cols]))).collect(
             engine="streaming")
         if frac < 1.0:
             frame = frame.sample(fraction=frac, seed=seed, shuffle=False)
@@ -100,6 +107,7 @@ def train_and_score(cfg, tag: str, log, train_frac: float, valid_frac: float,
     y_train = {t: train[t].to_numpy().astype("float64") for t in TARGETS}
     y_valid = {t: valid[t].to_numpy().astype("float64") for t in TARGETS}
     valid_ts = valid["ts"].to_numpy()
+    naive_values = {c: valid[c].to_numpy().astype("float64") for c in set(naive_cols)}
     del train, valid
     gc.collect()
 
@@ -136,7 +144,31 @@ def train_and_score(cfg, tag: str, log, train_frac: float, valid_frac: float,
     out["train_seconds"] = round(train_seconds, 1)
     out["infer_seconds"] = round(infer_seconds, 2)
     out["mean_mae"] = float(np.mean([out[t]["mae"] for t in TARGETS]))
+    out["mean_wape"] = float(np.mean([out[t]["wape"] for t in TARGETS]))
     out["mean_hotspot_f1"] = float(np.mean([out[t]["hotspot_f1"] for t in TARGETS]))
+
+    # Seasonal Naive at THIS resolution, on the same validation rows.
+    #
+    # This is what makes the resolutions comparable at all. No raw accuracy metric is
+    # scale-invariant here: MAE falls automatically as cells shrink (smaller counts),
+    # and WAPE falls automatically as cells grow (aggregation smooths relative error).
+    # Taken to the limit each would crown a degenerate grid. A skill score - how much
+    # better the model is than the trivial forecast *at the same resolution* - divides
+    # the scale effect out, because both numerator and denominator live on that grid.
+    naive_mae, naive_wape = [], []
+    for target in TARGETS:
+        kind, _, horizon = target.partition("_h")
+        source = "pickups" if kind == "pickup" else "dropoffs"
+        season = baseline.seasonal_lag_steps(cfg)["same_week"]
+        column = baseline.lag_column_for(source, season, int(horizon))
+        prediction = np.clip(naive_values[column], 0, None)
+        metrics = all_metrics(y_valid[target], prediction)
+        out[f"naive_{target}"] = metrics
+        naive_mae.append(metrics["mae"])
+        naive_wape.append(metrics["wape"])
+    out["naive_mean_mae"] = float(np.mean(naive_mae))
+    out["naive_mean_wape"] = float(np.mean(naive_wape))
+    out["skill_vs_naive"] = float(1.0 - out["mean_mae"] / out["naive_mean_mae"])
     del x_train, x_valid
     gc.collect()
     return out
@@ -154,7 +186,7 @@ def build_config(cfg, log, overlay: str, resolution: int, tag: str,
         log.info("  building panel %s", tag)
         timings["panel_seconds"] = round(
             run("10_build_panel.py", "--spatial", overlay, "--resolution", str(resolution),
-                "--memory-limit", "9GB", "--batch-rows", "12000000"), 1)
+                "--memory-limit", "9GB"), 1)
     if rebuild or not features_path.exists():
         log.info("  building features %s", tag)
         timings["features_seconds"] = round(
@@ -191,7 +223,7 @@ def match_s2_level(cfg, h3_stats: dict, log) -> dict:
     """
     from src.spatial.s2_indexer import S2Indexer
 
-    candidates = cfg.dotted("matching.candidate_levels") if "matching" in cfg else [13, 14, 15, 16]
+    candidates = cfg.dotted("spatial.candidate_levels", [12, 13, 14, 15, 16])
     area_weight = cfg.dotted("matching.area_weight", 0.5)
     count_weight = cfg.dotted("matching.active_cell_count_weight", 0.5)
 
@@ -255,17 +287,34 @@ def main() -> int:
                      entry["mean_mae"])
 
         table = [results["h3"][k] for k in sorted(results["h3"], key=int)]
-        best = min(table, key=lambda r: r["mean_mae"])
-        results["best_h3_resolution"] = best["resolution"]
-        log.info("")
-        log.info("%-6s %8s %10s %9s %8s %8s %9s %9s", "res", "regions", "area_km2",
-                 "zero%", "MAE", "HotF1", "feat_s", "train_s")
         for row in table:
-            log.info("%-6s %8d %10.5f %9.2f %8.4f %8.4f %9.0f %9.0f",
+            row["mean_wape"] = float(np.mean([row[t]["wape"] for t in TARGETS]))
+        # MAE is NOT comparable across resolutions: coarser cells hold more demand, so
+        # their absolute errors are mechanically larger and picking by MAE would always
+        # crown the finest grid regardless of skill. WAPE is scale-free (error relative
+        # to demand) and Hotspot-F1 is rank-based, so both survive the change of scale.
+        best = max(table, key=lambda r: r["skill_vs_naive"])
+        results["best_h3_resolution"] = best["resolution"]
+        results["selection_criterion"] = (
+            "skill vs Seasonal Naive at the same resolution (1 - model_MAE/naive_MAE). "
+            "Raw MAE falls automatically as cells shrink and raw WAPE falls "
+            "automatically as cells grow, so neither is comparable across "
+            "resolutions; a skill score divides the scale effect out."
+        )
+        log.info("")
+        log.info("%-6s %8s %10s %7s %9s %8s %9s %8s %8s", "res", "regions", "area_km2",
+                 "zero%", "MAE(*)", "WAPE(*)", "naiveMAE", "SKILL", "HotF1")
+        for row in table:
+            log.info("%-6s %8d %10.5f %7.2f %9.4f %8.4f %9.4f %8.4f %8.4f",
                      row["tag"], row["active_regions"], row["median_area_km2"],
-                     row["zero_demand_pct"], row["mean_mae"], row["mean_hotspot_f1"],
-                     row["features_seconds"], row["train_seconds"])
-        log.info("  best H3 resolution by mean MAE: %s", best["tag"])
+                     row["zero_demand_pct"], row["mean_mae"], row["mean_wape"],
+                     row["naive_mean_mae"], row["skill_vs_naive"], row["mean_hotspot_f1"])
+        log.info("  (*) raw MAE and WAPE are NOT comparable across resolutions - MAE "
+                 "shrinks with cell size, WAPE grows with it. SKILL is.")
+        log.info("  best H3 resolution by skill vs Seasonal Naive: %s "
+                 "(skill %.4f, %.1f%% zero-demand, %d regions)",
+                 best["tag"], best["skill_vs_naive"], best["zero_demand_pct"],
+                 best["active_regions"])
         results_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
 
     if args.part in ("B", "all"):
@@ -302,17 +351,24 @@ def main() -> int:
         best_res = results.get("best_h3_resolution")
         h3_entry = results["h3"][str(best_res)]
         log.info("")
-        log.info("%-8s %8s %10s %8s %8s %8s %9s %9s %9s", "system", "regions",
-                 "area_km2", "zero%", "MAE", "HotF1", "feat_s", "train_s", "size_MB")
+        log.info("%-8s %8s %10s %8s %8s %8s %8s %8s %9s", "system", "regions",
+                 "area_km2", "zero%", "MAE(*)", "WAPE", "HotF1", "train_s", "size_MB")
         for row in (h3_entry, entry):
-            log.info("%-8s %8d %10.5f %8.2f %8.4f %8.4f %9.0f %9.0f %9.0f",
+            log.info("%-8s %8d %10.5f %8.2f %8.4f %8.4f %8.4f %8.0f %9.0f",
                      row["tag"], row["active_regions"], row["median_area_km2"],
-                     row["zero_demand_pct"], row["mean_mae"], row["mean_hotspot_f1"],
-                     row["features_seconds"], row["train_seconds"], row["features_mb"])
-        delta = 100 * (entry["mean_mae"] - h3_entry["mean_mae"]) / h3_entry["mean_mae"]
-        winner = "H3" if h3_entry["mean_mae"] <= entry["mean_mae"] else "S2"
-        results["h3_vs_s2"] = {"winner": winner, "s2_mae_vs_h3_pct": round(delta, 3)}
-        log.info("  %s wins on MAE (S2 is %+.2f%% vs H3)", winner, delta)
+                     row["zero_demand_pct"], row["mean_mae"], row["mean_wape"],
+                     row["mean_hotspot_f1"], row["train_seconds"], row["features_mb"])
+        for row in (h3_entry, entry):
+            row.setdefault("mean_wape",
+                           float(np.mean([row[t]["wape"] for t in TARGETS])))
+        # matched granularity still is not identical granularity, so compare on the
+        # scale-free metric here too
+        delta = 100 * (entry["mean_wape"] - h3_entry["mean_wape"]) / h3_entry["mean_wape"]
+        winner = "H3" if h3_entry["mean_wape"] <= entry["mean_wape"] else "S2"
+        results["h3_vs_s2"] = {"winner": winner, "s2_wape_vs_h3_pct": round(delta, 3),
+                               "h3_wape": h3_entry["mean_wape"],
+                               "s2_wape": entry["mean_wape"]}
+        log.info("  %s wins on WAPE (S2 is %+.2f%% vs H3)", winner, delta)
         results_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
 
     log.info("results -> %s", results_path)

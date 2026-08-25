@@ -1,9 +1,81 @@
 # STATUS
 
-**Current phase:** 4 - Full feature engineering + A-H ablation - **COMPLETE**
-**State:** Phase 1-3 gates green; Phase 4 ablation run, final feature set chosen.
-135 tests passing.
-**Next phase:** 5 - spatial representation experiments (H3 resolution, H3 vs S2).
+**Current phase:** 5 - Spatial representation experiments - **COMPLETE**
+**State:** Phases 1-5 done. Phase 6 in progress: ST-GNN trained locally; TFT and the
+matched-S2 deep runs move to Kaggle GPU.
+**Next:** Phase 6 deep models on Kaggle -> Phase 7 (TEST) -> Phase 8 (operations).
+
+---
+
+## Phase 5 - Definition of Done (COMPLETE)
+
+- [x] H3-8/9/10 comparison table generated, best resolution chosen and justified
+- [x] S2 level selected via the matching procedure, not guessed
+- [x] H3 vs S2 comparison with both accuracy and efficiency columns
+- [x] Results saved to `outputs/experiments/phase5_spatial.json`
+- [x] `docs/STATUS.md` updated, phase committed to git
+
+### RQ1 - which H3 resolution?
+
+Model and feature set held constant; identical training budget at every resolution.
+
+| res | regions | area km2 | zero% | MAE(*) | WAPE(*) | naive MAE | **SKILL** | HotF1 |
+|---|---|---|---|---|---|---|---|---|
+| **H3-8** | 321 | 0.741 | 47.5% | 1.654 | 0.308 | 2.224 | **0.2563** | 0.748 |
+| H3-9 | 1483 | 0.106 | 71.4% | 0.705 | 0.605 | 0.873 | 0.1920 | 0.590 |
+| H3-10 | 2162 | 0.015 | 75.6% | 0.580 | 0.731 | 0.706 | 0.1791 | 0.481 |
+
+**Winner: H3-8.**
+
+**The metric choice here is the whole result, so it is stated explicitly.** No raw
+accuracy metric is comparable across resolutions:
+
+* **MAE falls automatically as cells shrink** - smaller cells hold smaller counts, so
+  absolute errors shrink mechanically. Picking by MAE crowns H3-10 regardless of skill.
+* **WAPE falls automatically as cells grow** - aggregation smooths relative error.
+  Picking by WAPE crowns the coarsest grid, and in the limit a single cell.
+* **Hotspot-F1 depends on region count** - the top 10% of 321 regions is a different
+  task from the top 10% of 2,162.
+
+The three disagree completely (MAE says H3-10, WAPE and Hotspot-F1 say H3-8), which is
+the tell that none of them is measuring skill. **Skill vs Seasonal Naive at the same
+resolution** (`1 - model_MAE / naive_MAE`) divides the scale effect out, because
+numerator and denominator live on the same grid. On that measure H3-8 wins - and it
+also wins the spec's second criterion, sparsity, at 47.5% zero-demand cells versus
+75.6% at H3-10.
+
+### RQ2 - H3 or S2?
+
+S2 level **13** selected by the matching procedure: weighted log-ratio distance on
+median cell area *and* active-cell count (score 0.319; next best L14 at 0.951).
+Log-ratio so that "twice as coarse" and "twice as fine" cost the same.
+
+| system | regions | area km2 | zero% | MAE | WAPE | naive MAE | SKILL | HotF1 | features MB | train s |
+|---|---|---|---|---|---|---|---|---|---|---|
+| H3-8 | 321 | 0.741 | 47.5% | 1.654 | 0.308 | 2.224 | 0.2563 | 0.748 | 430 | 32 |
+| S2-13 | 231 | 1.088 | 42.1% | 2.002 | 0.269 | 2.757 | **0.2741** | 0.769 | 328 | 24 |
+
+**S2-13 edges H3-8 on skill (0.274 vs 0.256) - but the honest reading is that the
+spatial system barely matters.** S2-13 cells are still **47% larger** than H3-8's;
+matched granularity is not identical granularity, because quadrilaterals cannot tile
+to the same areas as hexagons. That residual coarseness plausibly accounts for the
+entire 1.8-point gap. **Resolution is the decision that matters; H3 vs S2 is close to
+a coin flip**, with S2 marginally cheaper to build (328 vs 430 MB, 24 vs 32 s).
+
+---
+
+## Phase 6 - in progress
+
+**ST-GNN (H3-9), trained locally on CPU:** 52,936 parameters, 8 epochs, 99 minutes.
+Best validation mean MAE **0.7149**; at h1 pickup **0.6917**, which slightly beats the
+Phase 3 LightGBM's 0.6945 on the same target. A 53k-parameter graph model matching a
+gradient-boosted ensemble is a real result for RQ3, though not yet a decisive one.
+
+**Moving to Kaggle GPU.** `kaggle_upload/` (557 MB) contains bundles for H3-8 (the
+Phase 5 winner) and S2-13 (matched), plus `src/models/deep.py` itself so the Kaggle
+run cannot silently diverge from the repo, and a notebook that trains the 4-config
+deep matrix `{H3-8, S2-13} x {ST-GNN, TFT}`. The LightGBM half of the matrix stays
+local - it is CPU-bound and needs the 5.9 GB feature table.
 
 ---
 

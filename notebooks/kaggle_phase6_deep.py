@@ -6,14 +6,21 @@ the notebook is self-contained - no repo checkout needed on Kaggle.
 
 SETUP
 -----
-1. Locally:  python scripts/20_export_deep_bundle.py --spatial h3 --resolution 9
-             python scripts/20_export_deep_bundle.py --spatial s2 --resolution <matched>
-2. Upload `data/processed/deep_bundle_h39/` (and the S2 one) as a Kaggle Dataset,
-   e.g. named `geopulse-deep-bundles`.
-3. Notebook settings: Accelerator = GPU T4 x2 (or P100), Internet = off.
-4. Set BUNDLE_DIR below to the attached path and run.
-5. Download `/kaggle/working/deep_metrics_*.json` and `*.pt` back into
-   `outputs/metrics/` and `outputs/models/` locally, then run Phase 7.
+1. Everything needed is already assembled locally in `kaggle_upload/`:
+       deep_bundle_h38/   (Phase 5 winner: H3-8)
+       deep_bundle_s213/  (matched S2 level 13)
+       deep_bundle_h39/   (optional - the resolution Phases 3-4 were built at)
+       deep.py            (the model definitions, so Kaggle and local cannot diverge)
+2. Upload `kaggle_upload/` as a Kaggle Dataset named `geopulse-deep-bundles`
+   (557 MB - well inside the limit).
+3. Notebook settings: Accelerator = GPU T4 x2 or P100, Internet = off.
+4. Paste this file into a cell and run. It trains 4 configs:
+   {h38, s213} x {ST-GNN, TFT} - the deep half of the Phase 6 model matrix.
+5. Download from /kaggle/working back into the repo:
+       *.pt                 -> outputs/models/
+       deep_metrics_*.json  -> outputs/metrics/
+       deep_summary.json    -> outputs/metrics/
+   then run `python scripts/23_evaluate_test.py` locally for Phase 7.
 
 WHY THIS RUNS HERE AND THE REST RUNS LOCALLY
 --------------------------------------------
@@ -30,7 +37,11 @@ import numpy as np
 import torch
 
 # ----------------------------------------------------------------- configuration
-BUNDLE_DIR = Path("/kaggle/input/geopulse-deep-bundles/deep_bundle_h39")
+# Phase 5 chose H3-8 (best skill vs Seasonal Naive) and matched it to S2 level 13.
+# Running both gives the {best-H3, matched-S2} x {TFT, ST-GNN} half of the Phase 6
+# model matrix; the LightGBM half is trained locally.
+INPUT_ROOT = Path("/kaggle/input/geopulse-deep-bundles")
+BUNDLE_TAGS = ["h38", "s213"]
 OUT_DIR = Path("/kaggle/working")
 EPOCHS = 8
 STGNN_BATCH = 8            # one sample = one timestamp = every region at once
@@ -42,7 +53,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 # The model definitions are identical to src/models/deep.py in the repo. Kaggle
 # notebooks cannot import from the repo, so they are inlined via exec of the file if
 # present, else copy src/models/deep.py into a dataset and point at it here.
-DEEP_SRC = Path("/kaggle/input/geopulse-deep-bundles/deep.py")
+DEEP_SRC = INPUT_ROOT / "deep.py"
 if DEEP_SRC.exists():
     exec(DEEP_SRC.read_text())  # noqa: S102 - trusted, self-authored source
 else:
@@ -53,8 +64,8 @@ else:
     )
 
 
-def run(model_name: str) -> dict:
-    bundle = Bundle.load(BUNDLE_DIR)  # noqa: F821 - from deep.py
+def run(model_name: str, bundle_dir: Path) -> dict:
+    bundle = Bundle.load(bundle_dir)  # noqa: F821 - from deep.py
     horizons = bundle.meta["horizons"]
     scaled = bundle.scaled_demand()
     weather = bundle.scaled_weather()
@@ -123,8 +134,13 @@ def run(model_name: str) -> dict:
         model.eval()
         preds, actuals = [], []
         with torch.no_grad():
-            for i in range(0, min(len(valid_anchors), batch_size * 120), batch_size):
-                anchors = valid_anchors[i:i + batch_size]
+            # Spread evaluation across the WHOLE validation period. The split starts
+            # at midnight on 1 September, so a contiguous prefix would score the model
+            # almost entirely on empty overnight bins.
+            stride = max(1, len(valid_anchors) // (120 * batch_size))
+            eval_anchors = valid_anchors[::stride][:120 * batch_size]
+            for i in range(0, len(eval_anchors), batch_size):
+                anchors = eval_anchors[i:i + batch_size]
                 if len(anchors) == 0:
                     break
                 inputs, targets = make_batch(anchors, False)

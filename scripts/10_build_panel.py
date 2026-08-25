@@ -48,11 +48,12 @@ def main() -> int:
     log = get_logger("panel", cfg)
 
     if args.resolution is not None:
-        cfg = dict(cfg)
-        cfg["spatial"] = {**cfg["spatial"], "resolution": args.resolution}
         from src.utils.config import Config
 
-        cfg = Config(cfg)
+        # S2 reads `level`, H3 reads `resolution` - set both so either indexer sees it
+        cfg = Config({**cfg, "spatial": {**cfg["spatial"],
+                                         "resolution": args.resolution,
+                                         "level": args.resolution}})
     indexer = make_indexer(cfg)
     tag = f"{indexer.name}{indexer.resolution}"
     log.info("spatial system: %s", indexer)

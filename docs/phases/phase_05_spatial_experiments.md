@@ -26,11 +26,11 @@ zero-demand %, region count, median trips/region, feature-build time, training t
 inference time, storage size, and whether neighbor features behave similarly.
 
 ## Definition of Done
-- [ ] H3-8/9/10 comparison table generated, best resolution chosen and justified
-- [ ] S2 level selected via matching procedure, not guessed
-- [ ] H3 vs S2 comparison table generated with both accuracy and efficiency columns
-- [ ] Results saved to `outputs/experiments/`
-- [ ] `docs/STATUS.md` updated, phase committed to git
+- [x] H3-8/9/10 comparison table generated, best resolution chosen and justified
+- [x] S2 level selected via matching procedure, not guessed
+- [x] H3 vs S2 comparison table generated with both accuracy and efficiency columns
+- [x] Results saved to `outputs/experiments/`
+- [x] `docs/STATUS.md` updated, phase committed to git
 
 ## Note on scope
 This phase (plus TFT/ST-GNN in Phase 6) is the part of the plan that goes beyond a
