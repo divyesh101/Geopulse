@@ -57,6 +57,12 @@ on 79 million Citi Bike trips from 2023-2024.
    rather than guessing. Our gazetteer is built from station names and has real
    holes.
 
+## Output rules
+Plain text with **bold** for emphasis. Never emit images, links, or markdown image
+syntax - you have no image endpoint and any URL you write is invented. The map is
+drawn by the app from the same tool results you were given; do not describe it as if
+you produced it.
+
 ## Style
 Warm, brief, concrete. Lead with the answer. Give the real drivers the model used -
 recent momentum, weekly seasonality, time of week - not a plausible-sounding story.
@@ -93,6 +99,26 @@ TOOL_SCHEMAS = [
                                    "seasonal_naive_same_week"]},
                 "spatial": {"type": "string", "enum": ["h3", "s2"]},
                 "resolution": {"type": "integer"},
+            },
+            "required": ["lat", "lng"],
+        },
+    },
+    {
+        "name": "route_to_bike",
+        "description": "Walk the user to the dock worth walking to and return the "
+                       "path. Chooses by distance AND forecast availability, so it "
+                       "may skip a closer dock that is draining. Use whenever the "
+                       "user asks where to go, how to get there, or for directions.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "lat": {"type": "number"}, "lng": {"type": "number"},
+                "when": {"type": "string"}, "horizon": {"type": "integer"},
+                "model": {"type": "string"},
+                "spatial": {"type": "string"}, "resolution": {"type": "integer"},
+                "prefer_available": {
+                    "type": "boolean",
+                    "description": "false to route strictly to the nearest dock"},
             },
             "required": ["lat", "lng"],
         },
@@ -193,6 +219,23 @@ def _extract_time(message: str, fallback: str | None) -> str | None:
     return fallback
 
 
+_MEDIA = re.compile(r"!\[[^\]]*\]\([^)]*\)")
+_LINK = re.compile(r"\[([^\]]+)\]\((?:https?|data):[^)]*\)")
+
+
+def _sanitise(text: str) -> str:
+    """Strip invented media and links from model output.
+
+    An LLM with no image tool will still sometimes emit `![map](https://...)`. The
+    frontend escapes it, so it is not an injection risk - it just renders as noise
+    and implies a capability that does not exist. Links keep their label and lose
+    the URL.
+    """
+    text = _MEDIA.sub("", text)
+    text = _LINK.sub(r"\1", text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
 def _place_from_calls(calls: list[dict]) -> dict | None:
     """The last place an LLM actually resolved, so the map can follow it."""
     for call in reversed(calls):
@@ -267,6 +310,7 @@ class Assistant:
         if brain is not None:
             try:
                 out = brain(message, session)
+                out["text"] = _sanitise(out.get("text", ""))
                 # the router sets `place` inline; an LLM decides for itself which
                 # tools to call, so recover the location it settled on from the
                 # find_place result - otherwise the map never follows the answer
@@ -445,6 +489,37 @@ class Assistant:
                                                "how come", "what makes"))
         wants_compare = any(w in lowered for w in ("compare", "models", "which model",
                                                    "versus", " vs "))
+        wants_route = any(w in lowered for w in ("take me", "route", "directions",
+                                                 "walk", "how do i get", "navigate",
+                                                 "get there", "go to", "nearest bike"))
+
+        if wants_route:
+            data = run("route_to_bike", lat=best["lat"], lng=best["lng"], when=when,
+                       horizon=horizon, model=model, spatial=spatial,
+                       resolution=resolution)
+            if not data.get("ok"):
+                return {"text": data.get("error", "Could not plan a route."),
+                        "tool_calls": used, "mode": "router", "place": best}
+            station = data["target"]["station"]
+            if not data.get("walkable", True):
+                return {"text": (f"The closest dock to **{best['name']}** is "
+                                 f"**{station['station_name']}**, "
+                                 f"{data['walk_metres'] / 1000:.1f} km away — too far "
+                                 f"to walk. Citi Bike doesn't cover this part of the "
+                                 f"city."),
+                        "tool_calls": used, "mode": "router", "place": best}
+            smarter = ("" if data["chose_nearest"] else
+                       " That isn't the closest dock — the nearer one is draining, so "
+                       "this is the better bet.")
+            hops = (f" The path runs through {data['graph_hops']} intermediate "
+                    f"dock{'s' if data['graph_hops'] > 1 else ''}."
+                    if data["graph_hops"] else "")
+            return {"text": (f"Head to **{station['station_name']}** — "
+                             f"**{data['walk_metres']} m**, about "
+                             f"**{data['walk_minutes']:.0f} min** on foot.{smarter}"
+                             f"{hops} It's currently "
+                             f"{data['target']['availability']['label'].lower()}."),
+                    "tool_calls": used, "mode": "router", "place": best}
 
         if wants_compare:
             data = run("compare_models", lat=best["lat"], lng=best["lng"], when=when,

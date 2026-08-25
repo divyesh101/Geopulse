@@ -65,11 +65,62 @@ map.on("load", async () => {
     id: "cells-line", type: "line", source: "cells",
     paint: { "line-color": dark ? "#2fbc8d" : "#0b7a5a", "line-width": 0.35, "line-opacity": 0.5 },
   });
+  // the focused cell pulses translucently rather than switching to a solid fill,
+  // so the basemap underneath stays readable while the eye is drawn to it
+  map.addLayer({
+    id: "cells-blink", type: "fill", source: "cells",
+    filter: ["==", ["get", "region_id"], "__none__"],
+    paint: { "fill-color": dark ? "#54e3b3" : "#0b7a5a", "fill-opacity": 0.2 },
+  });
   map.addLayer({
     id: "cells-focus", type: "line", source: "cells",
     filter: ["==", ["get", "region_id"], "__none__"],
-    paint: { "line-color": dark ? "#eef2f4" : "#10161a", "line-width": 2.4 },
+    paint: {
+      "line-color": dark ? "#54e3b3" : "#0b7a5a",
+      "line-width": 2.6, "line-opacity": 0.9,
+    },
   });
+
+  // route: a soft wide glow under a bright dashed line, so the path reads over
+  // both the light and dark basemaps
+  map.addSource("route", { type: "geojson", data: emptyFC() });
+  map.addLayer({
+    id: "route-glow", type: "line", source: "route",
+    layout: { "line-cap": "round", "line-join": "round" },
+    paint: {
+      "line-color": dark ? "#54e3b3" : "#0b7a5a",
+      "line-width": 15, "line-opacity": 0.18, "line-blur": 10,
+    },
+  });
+  map.addLayer({
+    id: "route-line", type: "line", source: "route",
+    layout: { "line-cap": "round", "line-join": "round" },
+    paint: {
+      "line-color": dark ? "#7ef0c8" : "#0b7a5a",
+      "line-width": 5, "line-opacity": 0.95,
+    },
+  });
+  map.addLayer({
+    id: "route-dash", type: "line", source: "route",
+    layout: { "line-cap": "butt", "line-join": "round" },
+    paint: {
+      "line-color": "#ffffff", "line-width": 2.4, "line-opacity": 0.9,
+      "line-dasharray": [0, 4, 3],
+    },
+  });
+  map.addSource("route-points", { type: "geojson", data: emptyFC() });
+  map.addLayer({
+    id: "route-points", type: "circle", source: "route-points",
+    paint: {
+      "circle-radius": ["case", ["==", ["get", "kind"], "target"], 8, 5],
+      "circle-color": ["case", ["==", ["get", "kind"], "target"],
+        dark ? "#7ef0c8" : "#0b7a5a", "#ffffff"],
+      "circle-stroke-width": 2.5,
+      "circle-stroke-color": ["case", ["==", ["get", "kind"], "target"],
+        "#ffffff", dark ? "#7ef0c8" : "#0b7a5a"],
+    },
+  });
+  animateDash();
 
   map.on("click", "cells-fill", (e) => {
     const f = e.features[0];
@@ -83,6 +134,113 @@ map.on("load", async () => {
 });
 
 function emptyFC() { return { type: "FeatureCollection", features: [] }; }
+
+/* ── map effects ─────────────────────────────────────────────────── */
+
+/** Marching-ants along the route. Cycling dasharray is the only way to animate a
+ *  line in MapLibre; the sequence is pre-baked because setting it every frame at
+ *  fractional values causes visible stutter. */
+const DASHES = [
+  [0, 4, 3], [0.5, 4, 2.5], [1, 4, 2], [1.5, 4, 1.5],
+  [2, 4, 1], [2.5, 4, 0.5], [3, 4, 0], [0, 0.5, 3, 3.5],
+];
+let dashStep = 0;
+function animateDash() {
+  setInterval(() => {
+    if (!map.getLayer("route-dash")) return;
+    dashStep = (dashStep + 1) % DASHES.length;
+    map.setPaintProperty("route-dash", "line-dasharray", DASHES[dashStep]);
+  }, 90);
+}
+
+/** Pulse the focused cell's fill opacity. Kept translucent on purpose so the
+ *  streets underneath stay visible — a solid blink hides the thing you're
+ *  looking for. */
+let blinkFrame = null;
+function startBlink(regionId) {
+  stopBlink();
+  if (!regionId || !map.getLayer("cells-blink")) return;
+  map.setFilter("cells-blink", ["==", ["get", "region_id"], regionId]);
+  map.setFilter("cells-focus", ["==", ["get", "region_id"], regionId]);
+  const started = performance.now();
+  const tick = (now) => {
+    const t = (now - started) / 1000;
+    // sine keeps the pulse smooth at both ends rather than snapping
+    const o = 0.16 + 0.34 * (0.5 + 0.5 * Math.sin(t * 2.2));
+    map.setPaintProperty("cells-blink", "fill-opacity", o);
+    map.setPaintProperty("cells-focus", "line-opacity", 0.55 + 0.45 * (o / 0.5));
+    blinkFrame = requestAnimationFrame(tick);
+  };
+  blinkFrame = requestAnimationFrame(tick);
+}
+function stopBlink() {
+  if (blinkFrame) cancelAnimationFrame(blinkFrame);
+  blinkFrame = null;
+}
+
+/** Google-style approach: pull back, travel, then settle in.
+ *  MapLibre's flyTo already arcs when the jump is long; over a short hop it barely
+ *  moves, so the pull-back is forced to keep the motion legible. */
+function flyToPlace(lat, lng, zoom = 15.2) {
+  const from = map.getCenter();
+  const km = haversineKm(from.lat, from.lng, lat, lng);
+  const pullback = Math.max(10.2, Math.min(map.getZoom(), zoom) - (km > 3 ? 2.6 : 1.8));
+
+  map.easeTo({ zoom: pullback, duration: 520, easing: (t) => t * (2 - t) });
+  setTimeout(() => {
+    map.flyTo({
+      center: [lng, lat], zoom, curve: 1.5, speed: 0.75,
+      essential: true, padding: { bottom: sheetHeight() },
+    });
+  }, 480);
+}
+
+function haversineKm(aLat, aLng, bLat, bLng) {
+  const R = 6371, r = Math.PI / 180;
+  const dLat = (bLat - aLat) * r, dLng = (bLng - aLng) * r;
+  const h = Math.sin(dLat / 2) ** 2
+    + Math.cos(aLat * r) * Math.cos(bLat * r) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+
+function sheetHeight() {
+  return $("sheet").classList.contains("expanded") ? Math.min(innerHeight * 0.5, 380) : 190;
+}
+
+/** Draw the A* path and frame it. */
+function drawRoute(route) {
+  if (!route || !route.ok) return;
+  const coords = route.geometry.coordinates;
+  map.getSource("route").setData({
+    type: "FeatureCollection",
+    features: [{ type: "Feature", properties: {}, geometry: route.geometry }],
+  });
+  map.getSource("route-points").setData({
+    type: "FeatureCollection",
+    features: coords.map((c, i) => ({
+      type: "Feature",
+      properties: { kind: i === coords.length - 1 ? "target" : i === 0 ? "origin" : "hop" },
+      geometry: { type: "Point", coordinates: c },
+    })),
+  });
+
+  const lngs = coords.map((c) => c[0]);
+  const lats = coords.map((c) => c[1]);
+  const bounds = [[Math.min(...lngs), Math.min(...lats)],
+    [Math.max(...lngs), Math.max(...lats)]];
+  // pull back first so the whole path enters frame from a wider view
+  map.easeTo({ zoom: Math.max(map.getZoom() - 1.6, 11), duration: 460 });
+  setTimeout(() => map.fitBounds(bounds, {
+    padding: { top: 110, left: 70, right: 70, bottom: sheetHeight() + 40 },
+    maxZoom: 16.4, duration: 1250, curve: 1.5,
+  }), 420);
+}
+
+function clearRoute() {
+  if (!map.getSource("route")) return;
+  map.getSource("route").setData(emptyFC());
+  map.getSource("route-points").setData(emptyFC());
+}
 
 /* ── boot ────────────────────────────────────────────────────────── */
 async function boot() {
@@ -190,12 +348,24 @@ async function loadStations(lat, lng, moveMap = true) {
   const data = await fetch(url).then((r) => r.json());
   if (!data.ok) { showNotice(data.error); return; }
   renderStationCards(data);
-  if (data.stations.length) {
-    const region = data.stations[0].station.region_id;
-    map.setFilter("cells-focus", ["==", ["get", "region_id"], region]);
-  }
-  if (moveMap) map.easeTo({ center: [lng, lat], zoom: Math.max(map.getZoom(), 13.4) });
+  if (data.stations.length) startBlink(data.stations[0].station.region_id);
+  if (moveMap) flyToPlace(lat, lng, 15.2);
   expand(true);
+  loadRoute(lat, lng, moveMap);
+}
+
+async function loadRoute(lat, lng, frame = true) {
+  const url = `/api/route?lat=${lat}&lng=${lng}&grid=${state.grid}`
+    + `&model=${state.model}&horizon=${state.horizon}`
+    + `&when=${encodeURIComponent(state.when || "")}`;
+  const route = await fetch(url).then((r) => r.json()).catch(() => null);
+  if (!route || !route.ok) { clearRoute(); return; }
+  state.route = route;
+  renderRouteCard(route);
+  startBlink(route.target.station.region_id);
+  // the pin already flew to the origin; framing the path too would fight it
+  if (frame) setTimeout(() => drawRoute(route), 1100);
+  else drawRoute(route);
 }
 
 /* ── rendering ───────────────────────────────────────────────────── */
@@ -233,6 +403,45 @@ function renderStationCards(data) {
     card.addEventListener("click", () => dropPin(st.lat, st.lng, st.station_name));
     box.appendChild(card);
   });
+}
+
+function renderRouteCard(route) {
+  const t = route.target;
+  const st = t.station;
+  const card = document.createElement("div");
+  card.className = `card route-card${route.walkable ? "" : " unreachable"}`;
+  const smarter = !route.walkable
+    ? `<div class="route-smart warn">${escapeHtml(route.reachability)}</div>`
+    : route.chose_nearest ? ""
+      : `<div class="route-smart">Skipped a closer dock — that one is draining.</div>`;
+  card.innerHTML = `
+    <div class="route-head">
+      <div class="route-dest">
+        <div class="route-eyebrow">Walk to</div>
+        <div class="card-name"></div>
+      </div>
+      <div class="route-eta"><div class="n">${route.walkable
+        ? route.walk_minutes : (route.walk_metres / 1000).toFixed(1)}</div>
+        <div class="k">${route.walkable ? "min" : "km"}</div></div>
+    </div>
+    ${smarter}
+    <div class="route-meta">
+      <span>${route.walk_metres} m</span><span>·</span>
+      <span>${t.availability.label}</span>
+      ${route.graph_hops ? `<span>·</span><span>${route.graph_hops} hops</span>` : ""}
+    </div>
+    <div class="route-steps"></div>
+    <div class="card-approx"></div>`;
+  card.querySelector(".card-name").textContent = st.station_name;
+  card.querySelector(".route-steps").innerHTML = route.legs
+    .map((l) => `<div class="step"><span class="dotline"></span>
+        <span class="step-txt"></span><span class="step-m">${l.metres} m</span></div>`)
+    .join("");
+  [...card.querySelectorAll(".step-txt")].forEach((el, i) => {
+    el.textContent = route.legs[i].to;
+  });
+  card.querySelector(".card-approx").textContent = route.caveat;
+  $("cards").prepend(card);
 }
 
 function renderComparison(data) {
@@ -320,7 +529,10 @@ $("place-clear").addEventListener("click", () => {
   state.place = null;
   $("sheet-place").textContent = "NYC overview";
   $("cards").innerHTML = "";
+  stopBlink();
+  map.setFilter("cells-blink", ["==", ["get", "region_id"], "__none__"]);
   map.setFilter("cells-focus", ["==", ["get", "region_id"], "__none__"]);
+  clearRoute();
   if (marker) { marker.remove(); marker = null; }
   refresh();
 });
@@ -407,6 +619,11 @@ async function send(text) {
       if (!payload || !payload.ok) return;
       if (payload.stations) renderStationCards(payload);
       if (payload.models) renderComparison(payload);
+      if (payload.geometry && payload.target) {
+        drawRoute(payload);
+        renderRouteCard(payload);
+        startBlink(payload.target.station.region_id);
+      }
     });
   } catch (err) {
     thinking.remove();

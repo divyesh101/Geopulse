@@ -25,6 +25,7 @@ from src.serving.context import (
     availability_verdict, explain as explain_region, nearby_events, season_of,
 )
 from src.serving.engine import MODEL_LABELS, ForecastError, get_engine
+from src.serving.routing import route_to_best_station
 from src.serving.stations import nearest_stations, split_to_station
 
 #: the window the models were trained for; anything outside it is refused
@@ -173,6 +174,33 @@ def station_forecast(lat: float, lng: float, when: str | None = None, *,
     }
 
 
+def route_to_bike(lat: float, lng: float, when: str | None = None, *,
+                  horizon: int = 4, model: str = "lightgbm_final",
+                  spatial: str = "h3", resolution: int = 8,
+                  prefer_available: bool = True) -> dict:
+    """Walk the user to a dock worth walking to, and return the path.
+
+    Not simply the nearest dock: A* picks the target by walking distance *plus* a
+    penalty from the demand forecast, so a slightly longer walk to a dock that is
+    filling can beat a closer one that is emptying.
+    """
+    forecast = station_forecast(lat, lng, when, horizon=horizon, model=model,
+                                spatial=spatial, resolution=resolution, k=8)
+    if not forecast.get("ok"):
+        return forecast
+    route = route_to_best_station(lat, lng, forecast["stations"],
+                                  spatial=spatial, resolution=resolution,
+                                  prefer_available=prefer_available)
+    if not route.get("ok"):
+        return route
+    route["time"] = forecast["time"]
+    route["model"] = forecast["model"]
+    route["model_label"] = forecast["model_label"]
+    route["grid"] = forecast["grid"]
+    route["window_minutes"] = forecast["window_minutes"]
+    return route
+
+
 def explain_forecast(lat: float, lng: float, when: str | None = None, *,
                      horizon: int = 4, model: str = "lightgbm_final",
                      spatial: str = "h3", resolution: int = 8) -> dict:
@@ -304,4 +332,5 @@ TOOLS = {
     "explain_forecast": explain_forecast,
     "compare_models": compare_models,
     "city_overview": city_overview,
+    "route_to_bike": route_to_bike,
 }

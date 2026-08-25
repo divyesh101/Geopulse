@@ -164,6 +164,18 @@ def station_forecast(lat: float, lng: float, when: str | None = None,
     return JSONResponse(data, status_code=200 if data.get("ok") else 400)
 
 
+@app.get("/api/route")
+def route(lat: float, lng: float, when: str | None = None, grid: str = "h3-8",
+          model: str = "lightgbm_final", horizon: int = 4,
+          prefer_available: bool = True) -> JSONResponse:
+    """A* walking route to the dock worth walking to, not merely the closest."""
+    spatial, resolution = _grid(grid)
+    data = toolkit.route_to_bike(lat, lng, when, horizon=horizon, model=model,
+                                 spatial=spatial, resolution=resolution,
+                                 prefer_available=prefer_available)
+    return JSONResponse(data, status_code=200 if data.get("ok") else 400)
+
+
 @app.get("/api/explain")
 def explain(lat: float, lng: float, when: str | None = None, grid: str = "h3-8",
             model: str = "lightgbm_final", horizon: int = 4) -> JSONResponse:
