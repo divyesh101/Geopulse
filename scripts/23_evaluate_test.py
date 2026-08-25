@@ -36,7 +36,7 @@ from src.features.advanced import cumulative_feature_sets  # noqa: E402
 from src.features.basic import feature_columns as basic_feature_columns  # noqa: E402
 from src.models import baseline  # noqa: E402
 from src.models.splits import load_splits  # noqa: E402
-from src.utils.config import load_config, resolve_path  # noqa: E402
+from src.utils.config import Config, load_config, resolve_path  # noqa: E402
 from src.utils.logging_utils import get_logger, timed  # noqa: E402
 
 TARGET_KINDS = {"pickup": "pickups", "dropoff": "dropoffs"}
@@ -58,14 +58,19 @@ def breakdowns(frame: pl.DataFrame, actual: np.ndarray, prediction: np.ndarray,
                cfg) -> list[dict]:
     """Where the model fails, not just how much on average."""
     tz = cfg.dotted("time.timezone")
-    work = frame.select(["ts", "pickups"]).with_columns([
+    # only `ts` is genuinely required; `is_raining` rides along when the table has it
+    carried = ["ts"] + (["is_raining"] if "is_raining" in frame.columns else [])
+    work = frame.select(carried).with_columns([
         pl.Series("abs_error", np.abs(actual - prediction)),
         pl.Series("actual", actual),
         pl.col("ts").dt.convert_time_zone(tz).dt.hour().alias("hour"),
         (pl.col("ts").dt.convert_time_zone(tz).dt.weekday() >= 6).alias("is_weekend"),
     ])
     rows = []
-    for name, expr in [("hour_of_day", "hour"), ("weekend", "is_weekend")]:
+    groups = [("hour_of_day", "hour"), ("weekend", "is_weekend")]
+    if "is_raining" in work.columns:
+        groups.append(("rain", "is_raining"))
+    for name, expr in groups:
         grouped = work.group_by(expr).agg([
             pl.col("abs_error").mean().alias("mae"),
             pl.col("actual").mean().alias("actual_mean"),
@@ -99,6 +104,10 @@ def main() -> int:
     args = parser.parse_args()
 
     cfg = load_config(args.spatial, "lightgbm")
+    if args.resolution is not None:
+        key = "level" if cfg["spatial"].get("system") == "s2" else "resolution"
+        cfg = Config({**cfg, "spatial": {**cfg["spatial"], key: args.resolution,
+                                         "resolution": args.resolution}})
     log = get_logger("phase7", cfg)
     from src.spatial.h3_indexer import make_indexer
 
@@ -130,7 +139,10 @@ def main() -> int:
     features_basic = resolve_path(cfg, "paths.processed") / f"features_{tag}"
 
     if features4.exists():
-        needed = ["region_id", "ts", "dst_unreliable", *final_features, *targets]
+        # `pickups` and `is_raining` are not model inputs - they are carried purely
+        # so the error breakdown can split by demand level and by weather
+        needed = ["region_id", "ts", "dst_unreliable", *final_features, *targets,
+                  "pickups", "is_raining"]
         with timed(log, "load TEST (final feature set)"):
             test = load_test(features4, cfg, needed, args.test_frac, seed)
             test = test.drop_nulls(subset=targets)

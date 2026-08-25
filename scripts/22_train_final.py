@@ -63,6 +63,12 @@ def main() -> int:
     parser.add_argument("--train-frac", type=float, default=0.20)
     parser.add_argument("--valid-frac", type=float, default=1.0)
     parser.add_argument("--rounds", type=int, default=2000)
+    parser.add_argument("--objective", default=None,
+                        help="skip the objective bake-off and use this one")
+    parser.add_argument("--params-json", default=None,
+                        help="JSON of tuned params, to reuse a previous Optuna result")
+    parser.add_argument("--skip-existing", action="store_true",
+                        help="reuse already-fitted target models; they are still scored")
     args = parser.parse_args()
 
     cfg = load_config(args.spatial, "lightgbm")
@@ -123,7 +129,7 @@ def main() -> int:
     # ---- objective selection on validation, not by assumption
     probe = "pickup_h1"
     objective_scores = {}
-    for objective in ("poisson", "regression_l1"):
+    for objective in (() if args.objective else ("poisson", "regression_l1")):
         params = {**base, "objective": objective,
                   "metric": "mae" if objective == "regression_l1" else "mae"}
         booster = lgb.train(
@@ -138,12 +144,18 @@ def main() -> int:
                  booster.best_iteration)
         del booster
         gc.collect()
-    best_objective = min(objective_scores, key=objective_scores.get)
+    best_objective = args.objective or min(objective_scores, key=objective_scores.get)
     base["objective"] = best_objective
-    log.info("keeping objective: %s", best_objective)
+    log.info("keeping objective: %s%s", best_objective,
+             " (supplied, bake-off skipped)" if args.objective else "")
 
     tuned = {}
-    if args.tune:
+    if args.params_json:
+        tuned = json.loads(Path(args.params_json).read_text(encoding="utf-8")
+                           if Path(args.params_json).exists() else args.params_json)
+        base.update(tuned)
+        log.info("reusing supplied tuned params (no search): %s", tuned)
+    elif args.tune:
         import optuna
 
         optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -182,24 +194,33 @@ def main() -> int:
     results = []
     for target in targets:
         t0 = time.perf_counter()
-        booster = lgb.train(
-            base, lgb.Dataset(x_train, label=y_train[target], categorical_feature=[0],
-                              free_raw_data=False),
-            num_boost_round=args.rounds,
-            valid_sets=[lgb.Dataset(x_valid, label=y_valid[target], free_raw_data=False)],
-            callbacks=[lgb.early_stopping(60, verbose=False), lgb.log_evaluation(0)])
+        model_path = models_dir / f"lgbm_final_{tag}_{target}.txt"
+        reused = args.skip_existing and model_path.exists()
+        if reused:
+            # fitted by an earlier run - load and score it so the metrics file is
+            # complete, rather than silently leaving a hole or refitting for 4 minutes
+            booster = lgb.Booster(model_file=str(model_path))
+        else:
+            booster = lgb.train(
+                base, lgb.Dataset(x_train, label=y_train[target], categorical_feature=[0],
+                                  free_raw_data=False),
+                num_boost_round=args.rounds,
+                valid_sets=[lgb.Dataset(x_valid, label=y_valid[target], free_raw_data=False)],
+                callbacks=[lgb.early_stopping(60, verbose=False), lgb.log_evaluation(0)])
         prediction = np.clip(booster.predict(x_valid), 0, None)
         metrics = all_metrics(y_valid[target], prediction)
         results.append({"model": "lightgbm_final", "target": target, "split": "validate",
                         **metrics, **hotspot_f1(y_valid[target], prediction, valid_ts),
-                        "best_iteration": booster.best_iteration,
+                        "best_iteration": booster.best_iteration or booster.num_trees(),
+                        "reused": reused,
                         "train_seconds": round(time.perf_counter() - t0, 1)})
-        booster.save_model(str(models_dir / f"lgbm_final_{tag}_{target}.txt"),
-                           num_iteration=booster.best_iteration)
+        if not reused:
+            booster.save_model(str(model_path), num_iteration=booster.best_iteration)
         importance = booster.feature_importance("gain")
         top = sorted(zip(inputs, importance), key=lambda kv: -kv[1])[:15]
-        log.info("%-12s MAE=%.4f iters=%-4d %.0fs | top: %s", target, metrics["mae"],
-                 booster.best_iteration, results[-1]["train_seconds"],
+        log.info("%-12s MAE=%.4f iters=%-4d %.0fs%s | top: %s", target, metrics["mae"],
+                 booster.best_iteration or booster.num_trees(),
+                 results[-1]["train_seconds"], " (reused)" if reused else "",
                  ", ".join(name for name, _ in top[:5]))
         if target == "pickup_h1":
             (resolve_path(cfg, "paths.metrics", mkdir=True) /

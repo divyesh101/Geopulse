@@ -17,12 +17,14 @@ Everything about the inventory layer is an approximation and is labelled as one;
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import sys
 import time
 from pathlib import Path
 
 import duckdb
+import lightgbm as lgb
 import numpy as np
 import polars as pl
 
@@ -31,11 +33,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.inventory.estimate import (  # noqa: E402
     daily_flow_table, estimate_capacity, reconstruct_start_inventory,
 )
+from src.features.advanced import cumulative_feature_sets  # noqa: E402
+from src.models import baseline  # noqa: E402
 from src.models.splits import load_splits  # noqa: E402
 from src.rebalancing.greedy import (  # noqa: E402
     greedy_moves, shortage_surplus, simulate,
 )
-from src.utils.config import load_config, resolve_path  # noqa: E402
+from src.utils.config import Config, load_config, resolve_path  # noqa: E402
 from src.utils.geo import haversine_km  # noqa: E402
 from src.utils.logging_utils import get_logger, timed  # noqa: E402
 
@@ -43,6 +47,7 @@ from src.utils.logging_utils import get_logger, timed  # noqa: E402
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--spatial", default="h3")
+    parser.add_argument("--resolution", type=int, default=None)
     parser.add_argument("--sim-days", type=int, default=14,
                         help="days of TEST to simulate (full period is slow and adds little)")
     parser.add_argument("--rebalance-every", type=int, default=4,
@@ -51,6 +56,10 @@ def main() -> int:
     args = parser.parse_args()
 
     cfg = load_config(args.spatial, "lightgbm")
+    if args.resolution is not None:
+        key = "level" if cfg["spatial"].get("system") == "s2" else "resolution"
+        cfg = Config({**cfg, "spatial": {**cfg["spatial"], key: args.resolution,
+                                         "resolution": args.resolution}})
     log = get_logger("phase8", cfg)
     from src.spatial.h3_indexer import load_h3_extension, make_indexer
 
@@ -188,30 +197,113 @@ def main() -> int:
     lng = centroids["centroid_lng"].to_numpy()
     distances = haversine_km(lat[:, None], lng[:, None], lat[None, :], lng[None, :])
 
-    # --------------------------------------------------------------- simulations
+    # ----------------------------------------------- forecasts from the real models
+    # RQ4 asks whether a better forecast produces better OPERATIONS. Perfect foresight
+    # alone cannot answer that - it measures the rebalancer, not the model. So each
+    # model is replayed saying what it would actually have said at that instant, and
+    # every strategy is then simulated against the identical actual future demand.
     safety_pcts = ops_cfg["safety_inventory_pcts"]
     target_pct = ops_cfg["target_inventory_pct"]
-    horizon_steps = max(cfg.dotted("time.horizons"))
+    horizons = cfg.dotted("time.horizons")
+    horizon_steps = max(horizons)
+    models_dir = resolve_path(cfg, "paths.models")
 
+    def to_grid(frame: pl.DataFrame, values: dict) -> dict:
+        """Scatter per-row predictions onto the [n_steps, n_regions] simulation grid."""
+        ri = frame["region_id"].replace_strict(region_index, default=-1).to_numpy()
+        ti = frame["ts"].replace_strict(ts_index, default=-1).to_numpy()
+        keep = (ri >= 0) & (ti >= 0)
+        out = {}
+        for name, vec in values.items():
+            grid = np.zeros((n_steps, n_regions), dtype=np.float64)
+            grid[ti[keep], ri[keep]] = vec[keep]
+            out[name] = grid
+        return out
+
+    def window_filter(scan):
+        local = pl.col("ts").dt.convert_time_zone(tz).dt.date()
+        return scan.filter((local >= sim_start) & (local <= sim_end))
+
+    # None means "read the actual future" - the perfect-foresight upper bound
+    forecasts = {"perfect_foresight": None}
+
+    features4 = processed / f"features4_{tag}"
+    if features4.exists() and (models_dir / f"lgbm_final_{tag}_pickup_h1.txt").exists():
+        with timed(log, "replay lightgbm_final over the simulation window"):
+            feature_set = cumulative_feature_sets(cfg)[
+                cfg.dotted("advanced_features.final_families")[-1]]
+            pattern = str(features4 / "**" / "*.parquet")
+            # region_idx must match training: a dense rank over the table's full
+            # sorted region list, never over the simulation window's subset
+            all_regions = sorted(pl.scan_parquet(pattern).select("region_id").unique()
+                                 .collect(engine="streaming")["region_id"].to_list())
+            mapping = {r: i for i, r in enumerate(all_regions)}
+            frame = window_filter(pl.scan_parquet(pattern)).select(
+                sorted({"region_id", "ts", *feature_set})).collect(engine="streaming")
+            inputs = ["region_idx"] + [c for c in feature_set if c != "region_id"]
+            design = (frame.with_columns(
+                pl.col("region_id").replace_strict(mapping).alias("region_idx"))
+                .select(inputs).to_numpy().astype("float32", copy=False))
+            cumulative = {}
+            for kind in ("pickup", "dropoff"):
+                total = np.zeros(design.shape[0])
+                for h in horizons:
+                    booster = lgb.Booster(
+                        model_file=str(models_dir / f"lgbm_final_{tag}_{kind}_h{h}.txt"))
+                    total = total + np.clip(booster.predict(design), 0, None)
+                    del booster
+                cumulative[kind] = total
+            grids = to_grid(frame, cumulative)
+            forecasts["lightgbm_final"] = (grids["pickup"], grids["dropoff"])
+            del design, frame
+            gc.collect()
+    else:
+        log.info("no lgbm_final artifacts for %s - comparing perfect foresight and "
+                 "Seasonal Naive only", tag)
+
+    features_basic = processed / f"features_{tag}"
+    if features_basic.exists():
+        season = baseline.seasonal_lag_steps(cfg)["same_week"]
+        naive_cols = {kind: [baseline.lag_column_for(source, season, h) for h in horizons]
+                      for kind, source in (("pickup", "pickups"), ("dropoff", "dropoffs"))}
+        frame = window_filter(
+            pl.scan_parquet(str(features_basic / "**" / "*.parquet"))
+        ).select(
+            sorted({"region_id", "ts", *naive_cols["pickup"], *naive_cols["dropoff"]})
+        ).collect(engine="streaming")
+        grids = to_grid(frame, {
+            kind: np.clip(np.sum([frame[c].fill_null(0).to_numpy().astype("float64")
+                                  for c in names], axis=0), 0, None)
+            for kind, names in naive_cols.items()})
+        forecasts["seasonal_naive_same_week"] = (grids["pickup"], grids["dropoff"])
+        del frame
+        gc.collect()
+
+    # --------------------------------------------------------------- simulations
     baseline_run = simulate(inventory0, actual_pickups, actual_dropoffs, capacity_vec)
     log.info("NO REBALANCING: service level %.4f, unserved %s, overflow %s",
              baseline_run.service_level, f"{baseline_run.unserved_pickups:,.0f}",
              f"{baseline_run.overflow_dropoffs:,.0f}")
 
-    summaries = [{"strategy": "no_rebalancing", "safety_pct": None,
+    summaries = [{"strategy": "no_rebalancing", "forecast": None, "safety_pct": None,
                   **baseline_run.summary()}]
     all_moves = []
 
-    for safety_pct in safety_pcts:
-        # A perfect-foresight forecast isolates the value of the REBALANCER from the
-        # value of forecast accuracy. Any real model sits between this and no action.
+    def run_strategy(forecast_name, predicted, safety_pct):
+        """One rebalancing run; `predicted` None means perfect foresight."""
         inventory = inventory0.copy()
-        moves_by_step: dict[int, list[tuple[int, int, int]]] = {}
+        moves_by_step = {}
+        moves_log = []
         for step in range(0, n_steps - horizon_steps, args.rebalance_every):
-            window = slice(step + 1, step + 1 + horizon_steps)
+            if predicted is None:
+                window = slice(step + 1, step + 1 + horizon_steps)
+                expected_pickups = actual_pickups[window].sum(axis=0)
+                expected_dropoffs = actual_dropoffs[window].sum(axis=0)
+            else:
+                expected_pickups = predicted[0][step]
+                expected_dropoffs = predicted[1][step]
             projected = np.clip(
-                inventory + actual_dropoffs[window].sum(axis=0)
-                - actual_pickups[window].sum(axis=0), 0, capacity_vec)
+                inventory + expected_dropoffs - expected_pickups, 0, capacity_vec)
             shortage, surplus = shortage_surplus(projected, capacity_vec,
                                                  safety_pct, target_pct)
             moves = greedy_moves(shortage, surplus, inventory, capacity_vec, distances,
@@ -223,9 +315,10 @@ def main() -> int:
                     (region_index[m.source], region_index[m.destination], m.bikes)
                     for m in moves
                 ]
-                all_moves += [{"safety_pct": safety_pct, "timestamp": str(m.timestamp),
-                               "source": m.source, "destination": m.destination,
-                               "bikes_moved": m.bikes, "distance_km": round(m.distance_km, 3)}
+                moves_log += [{"forecast": forecast_name, "safety_pct": safety_pct,
+                               "timestamp": str(m.timestamp), "source": m.source,
+                               "destination": m.destination, "bikes_moved": m.bikes,
+                               "distance_km": round(m.distance_km, 3)}
                               for m in moves]
             # advance the running inventory through this step so the next round sees
             # a realistic level rather than the day-start estimate
@@ -233,20 +326,32 @@ def main() -> int:
             inventory = inventory - served
             accepted = np.minimum(actual_dropoffs[step], capacity_vec - inventory)
             inventory = inventory + accepted
+        # scored against the SAME actual demand, whatever drove the moves
+        return simulate(inventory0, actual_pickups, actual_dropoffs, capacity_vec,
+                        moves_by_step), moves_log
 
-        run = simulate(inventory0, actual_pickups, actual_dropoffs, capacity_vec,
-                       moves_by_step)
-        delta = run.service_level - baseline_run.service_level
-        summaries.append({"strategy": "forecast_driven", "safety_pct": safety_pct,
-                          **run.summary(),
-                          "service_level_gain": delta,
-                          "unserved_avoided": baseline_run.unserved_pickups - run.unserved_pickups})
-        log.info("safety %.0f%%: service %.4f (%+.4f) | unserved %s (avoided %s) | "
-                 "moved %s bikes over %s km in %d moves",
-                 100 * safety_pct, run.service_level, delta,
-                 f"{run.unserved_pickups:,.0f}",
-                 f"{baseline_run.unserved_pickups - run.unserved_pickups:,.0f}",
-                 f"{run.bikes_moved:,}", f"{run.distance_km:,.0f}", len(run.moves))
+    for forecast_name, predicted in forecasts.items():
+        for safety_pct in safety_pcts:
+            run, moves_log = run_strategy(forecast_name, predicted, safety_pct)
+            delta = run.service_level - baseline_run.service_level
+            # simulate() only tracks bikes_moved; the move log is the authority on
+            # how many moves were made and how far they went
+            n_moves = len(moves_log)
+            distance_km = sum(m["distance_km"] for m in moves_log)
+            summaries.append({"strategy": "forecast_driven", "forecast": forecast_name,
+                              "safety_pct": safety_pct, **run.summary(),
+                              "n_moves": n_moves,
+                              "distance_km": round(distance_km, 1),
+                              "service_level_gain": delta,
+                              "unserved_avoided":
+                                  baseline_run.unserved_pickups - run.unserved_pickups})
+            all_moves += moves_log
+            log.info("%-24s safety %3.0f%%: service %.4f (%+.4f) | unserved %s "
+                     "(avoided %s) | moved %s bikes over %s km in %s moves",
+                     forecast_name, 100 * safety_pct, run.service_level, delta,
+                     f"{run.unserved_pickups:,.0f}",
+                     f"{baseline_run.unserved_pickups - run.unserved_pickups:,.0f}",
+                     f"{run.bikes_moved:,}", f"{distance_km:,.0f}", f"{n_moves:,}")
 
     pl.DataFrame(summaries, infer_schema_length=None).write_parquet(
         metrics_dir / f"phase8_rebalancing_{tag}.parquet")
@@ -264,13 +369,14 @@ def main() -> int:
     }, indent=2, default=str), encoding="utf-8")
 
     log.info("")
-    log.info("%-18s %10s %14s %12s %12s %10s", "strategy", "safety", "service_level",
-             "unserved", "overflow", "bikes")
+    log.info("%-24s %7s %13s %10s %10s %9s %8s", "forecast", "safety", "service_level",
+             "unserved", "overflow", "bikes", "moves")
     for row in summaries:
-        log.info("%-18s %10s %14.4f %12.0f %12.0f %10s", row["strategy"],
+        log.info("%-24s %7s %13.4f %10.0f %10.0f %9s %8s",
+                 row["forecast"] or row["strategy"],
                  "-" if row["safety_pct"] is None else f"{100*row['safety_pct']:.0f}%",
                  row["service_level"], row["unserved_pickups"], row["overflow_dropoffs"],
-                 f"{row['bikes_moved']:,}")
+                 f"{row['bikes_moved']:,}", f"{row.get('n_moves', 0):,}")
     log.info("results -> %s", metrics_dir / f"phase8_rebalancing_{tag}.parquet")
     return 0
 

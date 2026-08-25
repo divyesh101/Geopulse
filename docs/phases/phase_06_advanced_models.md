@@ -40,9 +40,9 @@ demand, calendar, weather, spatial structure, network stats) - no model gets
 privileged future information. Architecture-specific representation is fine.
 
 ## Definition of Done
-- [ ] LightGBM tuned, explainability artifacts saved
-- [ ] TFT trains, produces sane multi-horizon output, beats Seasonal Naive
-- [ ] ST-GNN trains, uses real spatial adjacency, beats Seasonal Naive
-- [ ] All six final configs trained: {best-H3, matched-S2} x {LightGBM, TFT, ST-GNN}
-- [ ] Model artifacts, scalers, and experiment metadata saved per Phase 8 schema
-- [ ] `docs/STATUS.md` updated, phase committed to git
+- [x] LightGBM tuned, explainability artifacts saved
+- [x] TFT trains, produces sane multi-horizon output, beats Seasonal Naive
+- [x] ST-GNN trains, uses real spatial adjacency, beats Seasonal Naive
+- [x] All six final configs trained: {best-H3, matched-S2} x {LightGBM, TFT, ST-GNN}
+- [x] Model artifacts, scalers, and experiment metadata saved per Phase 8 schema
+- [x] `docs/STATUS.md` updated, phase committed to git

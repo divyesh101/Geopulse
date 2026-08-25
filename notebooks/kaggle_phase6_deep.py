@@ -40,8 +40,31 @@ import torch
 # Phase 5 chose H3-8 (best skill vs Seasonal Naive) and matched it to S2 level 13.
 # Running both gives the {best-H3, matched-S2} x {TFT, ST-GNN} half of the Phase 6
 # model matrix; the LightGBM half is trained locally.
-INPUT_ROOT = Path("/kaggle/input/geopulse-deep-bundles")
-BUNDLE_TAGS = ["h38", "s213"]
+# Kaggle sometimes nests the uploaded folder one level deeper, so nothing here is
+# hardcoded to an exact path - the files are located by searching /kaggle/input.
+KAGGLE_INPUT = Path("/kaggle/input")
+
+
+def _find(pattern: str, is_dir: bool):
+    roots = [KAGGLE_INPUT] if KAGGLE_INPUT.exists() else [Path(".")]
+    hits = []
+    for root in roots:
+        for candidate in root.rglob(pattern):
+            if candidate.is_dir() == is_dir:
+                hits.append(candidate)
+    return sorted(hits)
+
+
+print("--- what is actually attached ---")
+for path in sorted(KAGGLE_INPUT.glob("*")) if KAGGLE_INPUT.exists() else []:
+    print(" ", path)
+    for child in sorted(path.glob("*"))[:12]:
+        print("   ", child.name)
+
+BUNDLE_DIRS = {d.name.replace("deep_bundle_", ""): d
+               for d in _find("deep_bundle_*", is_dir=True)}
+print("bundles found:", {k: str(v) for k, v in BUNDLE_DIRS.items()})
+BUNDLE_TAGS = [t for t in ("h38", "s213") if t in BUNDLE_DIRS] or list(BUNDLE_DIRS)
 OUT_DIR = Path("/kaggle/working")
 EPOCHS = 8
 STGNN_BATCH = 8            # one sample = one timestamp = every region at once
@@ -53,15 +76,20 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 # The model definitions are identical to src/models/deep.py in the repo. Kaggle
 # notebooks cannot import from the repo, so they are inlined via exec of the file if
 # present, else copy src/models/deep.py into a dataset and point at it here.
-DEEP_SRC = INPUT_ROOT / "deep.py"
-if DEEP_SRC.exists():
-    exec(DEEP_SRC.read_text())  # noqa: S102 - trusted, self-authored source
-else:
+_deep_candidates = _find("deep.py", is_dir=False)
+print("deep.py candidates:", [str(c) for c in _deep_candidates])
+if not _deep_candidates:
     raise SystemExit(
-        "Upload src/models/deep.py alongside the bundle so the model definitions "
-        "match the repo exactly - re-implementing them here would let the Kaggle "
-        "run and the local run silently diverge."
+        "deep.py was not found anywhere under /kaggle/input. It must ship with the "
+        "bundle so the model definitions match the repo exactly - re-implementing "
+        "them here would let the Kaggle run and the local run silently diverge. "
+        "Check the listing printed above: if the dataset shows the files but not "
+        "deep.py, re-upload with 'deep.py' included (Kaggle can drop loose .py files "
+        "if the dataset was created from a zip)."
     )
+DEEP_SRC = _deep_candidates[0]
+print(f"using model definitions from: {DEEP_SRC}")
+exec(DEEP_SRC.read_text())  # noqa: S102 - trusted, self-authored source
 
 
 def run(model_name: str, bundle_dir: Path) -> dict:
@@ -168,6 +196,20 @@ if __name__ == "__main__":
     if DEVICE == "cuda":
         print(torch.cuda.get_device_name(0),
               f"{torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
-    for name in ("stgnn", "tft"):
-        print(f"\n=== {name} ===")
-        print(run(name))
+    summary = []
+    for tag in BUNDLE_TAGS:
+        bundle_dir = BUNDLE_DIRS.get(tag)
+        if bundle_dir is None or not bundle_dir.exists():
+            print(f"skipping {tag}: no deep_bundle_{tag} directory found")
+            continue
+        for name in ("stgnn", "tft"):
+            print(f"\n=== {name} @ {tag} ===")
+            result = run(name, bundle_dir)
+            summary.append(result)
+            print(f"  best valid MAE: {result['best_valid_mae']:.4f}")
+
+    (OUT_DIR / "deep_summary.json").write_text(json.dumps(summary, indent=2))
+    print("\n=== SUMMARY ===")
+    for row in summary:
+        print(f"  {row['model']:6s} {row['tag']:6s} valid MAE {row['best_valid_mae']:.4f}")
+    print(f"\nDownload from {OUT_DIR}: *.pt and deep_metrics_*.json / deep_summary.json")

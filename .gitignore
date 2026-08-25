@@ -23,3 +23,6 @@ Thumbs.db
 .vscode/
 .idea/
 kaggle_upload/
+
+# run logs are reproducible noise; metrics and reports are the artifacts
+/outputs/logs/

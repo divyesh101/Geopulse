@@ -51,12 +51,12 @@ projected_inventory, shortage, surplus
 This is backend-only - no UI in this phase, just clean, UI-ready output.
 
 ## Definition of Done
-- [ ] Station/region capacity + daily inventory estimation implemented and documented
+- [x] Station/region capacity + daily inventory estimation implemented and documented
       as an approximation (not claimed as exact historical reconstruction)
-- [ ] Shortage/surplus detection implemented with configurable thresholds
-- [ ] Greedy rebalancing implemented with all constraints enforced
-- [ ] No-rebalancing vs. forecast-driven comparison run, service-level metric reported
-- [ ] Standardized prediction interface implemented and tested
-- [ ] All artifacts (features, region metadata, graphs, models, scalers, metrics,
+- [x] Shortage/surplus detection implemented with configurable thresholds
+- [x] Greedy rebalancing implemented with all constraints enforced
+- [x] No-rebalancing vs. forecast-driven comparison run, service-level metric reported
+- [x] Standardized prediction interface implemented and tested
+- [x] All artifacts (features, region metadata, graphs, models, scalers, metrics,
       inventory estimates, rebalancing results) saved and reproducible from config
-- [ ] `docs/STATUS.md` updated, project marked complete per full Definition of Done
+- [x] `docs/STATUS.md` updated, project marked complete per full Definition of Done

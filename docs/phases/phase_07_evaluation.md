@@ -35,8 +35,8 @@ demand intensity. Identify whether failures cluster around spikes, rain, rush
 hour, weekends, or low-volume regions.
 
 ## Definition of Done
-- [ ] Full metric tables generated for all six model x spatial configs
-- [ ] Hotspot F1 computed at all three horizons
-- [ ] Region-level breakdown tables/plots saved
-- [ ] Error analysis written up with concrete failure patterns identified
-- [ ] `docs/STATUS.md` updated, phase committed to git
+- [x] Full metric tables generated for all six model x spatial configs
+- [x] Hotspot F1 computed at all three horizons
+- [x] Region-level breakdown tables/plots saved
+- [x] Error analysis written up with concrete failure patterns identified
+- [x] `docs/STATUS.md` updated, phase committed to git

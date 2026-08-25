@@ -63,10 +63,10 @@ def batch_sql(cfg, indexer, regions_sql: str, neighbors_sql: str, interval: int)
       SELECT * FROM panel WHERE region_id IN ({regions_sql})
     ),
     edges AS (
-      SELECT DISTINCT b.region_id,
-             unnest(h3_grid_ring(b.region_id, {cfg.dotted("advanced_features.neighbor_ring")}))
-               AS neighbor_id
-      FROM (SELECT DISTINCT region_id FROM batch) b
+      -- built in Python from indexer.neighbors() so H3 and S2 share one code path.
+      -- At ring 1 this is exactly h3_grid_ring(r, 1): grid_disk(r, 1) minus self.
+      SELECT region_id, neighbor_id FROM region_edges
+      WHERE region_id IN ({regions_sql})
     ),
     neighbor_panel AS (
       -- restrict the scan to the batch's neighbours; without this every batch
@@ -132,18 +132,21 @@ def add_series_features(frame: pl.DataFrame, cfg) -> pl.DataFrame:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dev-sample", action="store_true")
+    parser.add_argument("--spatial", default="h3")
     parser.add_argument("--resolution", type=int, default=None)
     parser.add_argument("--batch-rows", type=int, default=3_000_000)
     parser.add_argument("--memory-limit", default="8GB")
     parser.add_argument("--temp-dir", default=None)
     args = parser.parse_args()
 
-    cfg = load_config("h3")
+    cfg = load_config(args.spatial)
     if args.resolution is not None:
-        cfg = Config({**cfg, "spatial": {**cfg["spatial"], "resolution": args.resolution}})
+        key = "level" if cfg["spatial"].get("system") == "s2" else "resolution"
+        cfg = Config({**cfg, "spatial": {**cfg["spatial"], key: args.resolution,
+                                         "resolution": args.resolution}})
     log = get_logger("features4", cfg)
     indexer = make_indexer(cfg)
-    tag = f"h3{indexer.resolution}"
+    tag = f"{indexer.name}{indexer.resolution}"
     interval = cfg.dotted("time.interval_minutes")
 
     processed = resolve_path(cfg, "paths.processed")
@@ -166,19 +169,38 @@ def main() -> int:
     if args.temp_dir:
         Path(args.temp_dir).mkdir(parents=True, exist_ok=True)
         con.execute(f"SET temp_directory='{Path(args.temp_dir).as_posix()}'")
-    load_h3_extension(con)
+    if indexer.name == "h3":
+        load_h3_extension(con)
 
     source = (f"read_parquet('{(panel_path / '**' / '*.parquet').as_posix()}', hive_partitioning=true)"
               if partition else f"read_parquet('{panel_path.as_posix()}')")
     con.execute(f"CREATE VIEW panel AS SELECT * {'EXCLUDE (month)' if partition else ''} FROM {source}")
     con.execute(f"CREATE VIEW weather AS SELECT * FROM read_parquet('{(external / 'weather_hourly.parquet').as_posix()}')")
-    for name, path in (("events", processed / f"event_bins_{tag}.parquet"),
-                       ("traffic", processed / f"traffic_bins_{tag}.parquet"),
-                       ("station", processed / f"station_network_{tag}.parquet")):
-        if not path.exists():
-            log.error("missing %s - run scripts/16_map_external.py", path)
+    missing_external = []
+    for name, stem in (("events", "event_bins"), ("traffic", "traffic_bins"),
+                       ("station", "station_network")):
+        path = processed / f"{stem}_{tag}.parquet"
+        if path.exists():
+            con.execute(
+                f"CREATE VIEW {name} AS SELECT * FROM read_parquet('{path.as_posix()}')")
+            continue
+        # scripts/16_map_external.py is H3-only, so an S2 run has no external mapping.
+        # Borrow a sibling tag's SCHEMA with zero rows: the LEFT JOINs then produce the
+        # same NULL/0 defaults an empty mapping would, families E/F/H are honestly
+        # unusable for this tag, and A-D+G are still computed identically to H3.
+        siblings = sorted(processed.glob(f"{stem}_*.parquet"))
+        if not siblings:
+            log.error("missing %s with no sibling to take a schema from - run "
+                      "scripts/16_map_external.py", path)
             return 1
-        con.execute(f"CREATE VIEW {name} AS SELECT * FROM read_parquet('{path.as_posix()}')")
+        con.execute(f"CREATE VIEW {name} AS SELECT * FROM "
+                    f"read_parquet('{siblings[0].as_posix()}') WHERE false")
+        missing_external.append(name)
+    if missing_external:
+        log.warning("no %s mapping for %s - families E/F/H will be empty. The final "
+                    "feature set is %s, which does not use them.",
+                    "/".join(missing_external), tag,
+                    "+".join(cfg.dotted("advanced_features.final_families")))
     create_holiday_table(con, cfg)
 
     all_regions = [r[0] for r in con.execute(
@@ -188,6 +210,11 @@ def main() -> int:
     batch_size = max(1, min(len(all_regions), int(args.batch_rows // max(rows_per_region, 1))))
     batches = [all_regions[i:i + batch_size] for i in range(0, len(all_regions), batch_size)]
     region_set = set(all_regions)
+    ring = cfg.dotted("advanced_features.neighbor_ring")
+    edge_rows = [(r, n) for r in all_regions
+                 for n in indexer.neighbors(r, ring) if n in region_set]
+    con.register("region_edges", pl.DataFrame(
+        edge_rows, schema={"region_id": pl.Utf8, "neighbor_id": pl.Utf8}, orient="row"))
     log.info("panel %s rows, %s regions -> %d batches of up to %d regions",
              f"{panel_rows:,}", f"{len(all_regions):,}", len(batches), batch_size)
 

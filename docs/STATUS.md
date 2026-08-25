@@ -1,9 +1,17 @@
 # STATUS
 
-**Current phase:** 5 - Spatial representation experiments - **COMPLETE**
-**State:** Phases 1-5 done. Phase 6 in progress: ST-GNN trained locally; TFT and the
-matched-S2 deep runs move to Kaggle GPU.
-**Next:** Phase 6 deep models on Kaggle -> Phase 7 (TEST) -> Phase 8 (operations).
+**Current phase:** 8 - Operations - **COMPLETE**
+**State:** All eight phases done. TEST was opened exactly once, in Phase 7.
+146 tests green.
+
+**The four research questions, answered:**
+
+| RQ | question | answer |
+|---|---|---|
+| 1 | which H3 resolution? | **H3-8**, chosen on skill vs Seasonal Naive - the only metric that survives a change of cell size |
+| 2 | H3 or S2? | **near coin-flip.** S2-13 edges H3-8 on skill (0.274 vs 0.256) but its cells are 47% larger; resolution matters, the tiling scheme barely does |
+| 3 | do TFT/ST-GNN beat tuned LightGBM? | **not on MAE** - but TFT wins WAPE and ST-GNN wins Hotspot-F1, and both deep models were stopped undertrained at 8 epochs |
+| 4 | do better forecasts improve operations? | **yes among forecasts, no in absolute terms** - LightGBM beats even perfect foresight by moving less, but rebalancing itself does not pay at region granularity |
 
 ---
 
@@ -64,18 +72,261 @@ a coin flip**, with S2 marginally cheaper to build (328 vs 430 MB, 24 vs 32 s).
 
 ---
 
-## Phase 6 - in progress
+## Phase 8 - Operations: inventory, shortage, rebalancing (COMPLETE)
 
-**ST-GNN (H3-9), trained locally on CPU:** 52,936 parameters, 8 epochs, 99 minutes.
-Best validation mean MAE **0.7149**; at h1 pickup **0.6917**, which slightly beats the
-Phase 3 LightGBM's 0.6945 on the same target. A 53k-parameter graph model matching a
-gradient-boosted ensemble is a real result for RQ3, though not yet a decisive one.
+- [x] Capacity + daily inventory estimated and documented **as an approximation**
+- [x] Shortage/surplus detection with configurable thresholds (0%, 5%, 10% tested)
+- [x] Greedy rebalancing with all constraints enforced
+- [x] No-rebalancing vs forecast-driven comparison run, service level reported
+- [x] Standardized prediction interface implemented and tested (`src/serving/predict.py`)
+- [x] All artifacts saved and reproducible from config
 
-**Moving to Kaggle GPU.** `kaggle_upload/` (557 MB) contains bundles for H3-8 (the
-Phase 5 winner) and S2-13 (matched), plus `src/models/deep.py` itself so the Kaggle
-run cannot silently diverge from the repo, and a notebook that trains the 4-config
-deep matrix `{H3-8, S2-13} x {ST-GNN, TFT}`. The LightGBM half of the matrix stays
-local - it is CPU-bound and needs the 5.9 GB feature table.
+### Capacity and inventory (both estimated - no dock data exists)
+
+Citi Bike publishes no historical dock occupancy for 2023-2024, so capacity is the
+q95 of each station's daily cumulative net-flow range: **median 15 docks, p10 8,
+p90 53**, across 1,496,558 station-days and 2,459 stations. 2,387 stations were
+sized from their own flow; 72 low-volume ones fell back to their volume-decile
+median. Daily starting inventory is reconstructed per station-day inside the
+feasible interval, reset each day rather than chained across two years. **1.73% of
+station-days are infeasible without assuming staff intervened** and are flagged
+`inventory_unreliable`; median fit error is 0.00.
+
+### Rebalancing simulation (14 days of TEST, 1,348 steps x 321 regions)
+
+| forecast | safety | service level | unserved | overflow | bikes moved | moves |
+|---|---|---|---|---|---|---|
+| no rebalancing | - | **0.9958** | **8,540** | **6,286** | 0 | 0 |
+| perfect foresight | 5% | 0.9940 | 12,294 | 11,432 | 9,286 | 2,615 |
+| **LightGBM** | 5% | **0.9942** | **11,904** | **10,782** | 7,720 | 2,107 |
+| Seasonal Naive | 5% | 0.9939 | 12,391 | 11,355 | 9,531 | 2,699 |
+| perfect foresight | 10% | 0.9891 | 22,297 | 21,475 | 23,383 | 6,305 |
+| LightGBM | 10% | 0.9898 | 20,957 | 19,969 | 20,743 | 5,814 |
+| Seasonal Naive | 10% | 0.9891 | 22,235 | 21,291 | 23,468 | 6,402 |
+
+At safety 0% no region ever projects below the floor, so no strategy moves anything
+and all three reproduce the baseline exactly - a useful control that the harness is
+consistent.
+
+### RQ4 - do better forecasts produce better operations?
+
+**Two answers, and the second one is the honest headline.**
+
+**(a) Among forecasts, yes - and not in the direction anyone would guess.** At the 5%
+safety threshold, LightGBM leaves **11,904** pickups unserved against perfect
+foresight's **12,294** and Seasonal Naive's **12,391**. *A real model beats a perfect
+forecast.* That is not a paradox: LightGBM systematically under-forecasts (73% of its
+largest errors are under-predictions), so it triggers **2,107 moves instead of 2,615**
+- and in a regime where moving is harmful, restraint wins. This is exactly the
+failure mode the phase spec warned about, in a sharper form than expected: not merely
+"the lowest-MAE model is not automatically the best rebalancer", but *the perfect
+forecast is not the best rebalancer either*.
+
+**(b) Rebalancing itself does not pay here, and the reason is structural.** Every
+intervention makes service worse: unserved rises from 8,540 to 11,904 and overflow
+from 6,286 to 10,782 at 5% safety. The cause is granularity, not the algorithm.
+At H3-8, 321 regions aggregate 2,459 stations - roughly 7.7 stations and ~115 docks
+per region - against a median of ~3 trips per 15-minute bin. **A region that large
+essentially cannot run dry**, which is why the do-nothing baseline already serves
+99.58%. There is almost no shortage to recover, so the greedy rule spends its moves
+stripping bikes from regions above the 50% target (which need them later) to top up
+regions below the safety floor (which are empty because they have no demand).
+
+**The defensible conclusion: rebalancing value cannot be demonstrated at region
+granularity with estimated capacity.** The bike-rebalancing problem is real, but it
+lives at *station* level, and reconstructing station-level inventory well enough to
+prove it needs dock occupancy data this project does not have. Reporting a positive
+result here would have required tuning the thresholds until the sign flipped, which
+is exactly the kind of thing this phase was written to prevent.
+
+### Standardized prediction interface
+
+`src/serving/predict.py` implements the Phase 8 contract as a single function:
+
+```python
+predict(spatial_system, model_name, forecast_time, horizon) ->
+    region_id, forecast_time, horizon, predicted_pickups, predicted_dropoffs,
+    projected_inventory, shortage, surplus
+```
+
+It serves `lightgbm_final` and both Seasonal Naive variants across H3 and S2, refuses
+a `forecast_time` that is not on the 15-minute bin grid rather than silently rounding
+it, and carries `inventory_estimated` on every row so a caller cannot mistake the
+operational columns for measurements. 10 tests in `tests/test_serving.py` cover the
+contract and the end-to-end path, including that `shortage`/`surplus` follow
+arithmetically from `projected_inventory` and that no region is ever both short and
+in surplus.
+
+---
+
+## Phase 7 - Evaluation on TEST (COMPLETE)
+
+**TEST (Nov-Dec 2024) was opened exactly once**, by `scripts/23_evaluate_test.py`.
+Every model, feature set, resolution and hyperparameter was chosen on validation
+before this ran.
+
+### Model comparison on TEST, H3-8 (1,877,208 rows)
+
+| model | pickup h1 MAE | dropoff h1 MAE | pickup h1 WAPE | RMSE | Hotspot F1 |
+|---|---|---|---|---|---|
+| **LightGBM (tuned)** | **1.1408** | **1.1275** | 0.3573 | 2.2020 | 0.7248 |
+| ST-GNN | 1.2024 | 1.1978 | 0.3686 | 2.4180 | **0.7260** |
+| TFT | 1.2919 | 1.4969 | **0.3523** | 2.5071 | - |
+| Seasonal Naive (same day) | 1.8430 | 1.8253 | 0.5771 | 4.1931 | 0.6265 |
+| Seasonal Naive (same week) | 1.9575 | 1.9409 | 0.6130 | 4.4710 | 0.6380 |
+
+Degradation with horizon is mild and monotone: LightGBM pickup MAE runs
+1.1408 (h1) -> 1.1696 (h2) -> 1.2088 (h4), i.e. a one-hour forecast is only 6%
+worse than a 15-minute one.
+
+### RQ3 - do TFT and ST-GNN beat a tuned LightGBM?
+
+**No, not on MAE - but the answer is more interesting than the headline, and it
+comes with a real caveat.**
+
+1. **LightGBM wins absolute error at every horizon and both targets.** All three
+   models beat both Seasonal Naive variants by 35-42%, so every one of them is a
+   genuine model rather than a dressed-up persistence rule.
+2. **TFT wins WAPE while losing MAE** (0.3523 vs 0.3573 at pickup h1; 0.3468 vs
+   0.3663 at h2). WAPE weights by volume, so this says TFT is *better on the busy
+   cells that matter operationally* and worse across the mass of near-empty ones.
+   Reporting only MAE would have hidden that.
+3. **ST-GNN edges LightGBM on Hotspot-F1 at h1** (0.7260 vs 0.7248). Hotspot-F1
+   ranks regions against each other at each timestamp - precisely the comparison
+   the graph adjacency exists to inform. The margin is thin, but it lands where
+   the architecture predicts it should.
+
+**The caveat, stated plainly: the deep models are undertrained.** Both were stopped
+at 8 epochs on Kaggle and *both were still improving monotonically on the final
+epoch* (TFT at S2-13 dropped 7% on its last epoch alone). LightGBM, by contrast,
+ran to early-stopping convergence at 569-1101 boosting rounds. So this is
+**"tuned LightGBM beats an 8-epoch TFT/ST-GNN"**, not "gradient boosting beats deep
+learning on this problem". The honest reading is that LightGBM is the better
+*value* here - it converged in 48 minutes of CPU and won - not that the deep models
+were given their best shot.
+
+### Error analysis - where LightGBM actually fails
+
+**By hour of day** (pickup h1): worst at the afternoon peak - 16:00 MAE **1.809**,
+17:00 1.768, 15:00 1.699 - and near-perfect overnight (03:00 MAE **0.281**). Error
+tracks demand level almost exactly, which is expected for a count process.
+
+**By demand tercile** - the sharpest result:
+
+| band | MAE | actual mean | relative error |
+|---|---|---|---|
+| low | 0.404 | 0.00 | - |
+| mid | 0.837 | 1.35 | 62% |
+| high | **2.746** | **10.65** | **26%** |
+
+Absolute error concentrates in busy cells; *relative* error is more than twice as
+bad in the quiet ones. Which metric you quote decides which regions look broken.
+
+**By weather**: rain MAE 0.853 vs dry 1.177 - but this is **not** the model doing
+better in the rain. Mean actual demand is 1.57 in rain against 3.40 in dry
+conditions; rain suppresses cycling, and a smaller count carries a smaller absolute
+error. The apparent improvement is a demand effect, not a skill effect.
+
+**Top-100 largest errors** are strikingly concentrated:
+- **73% are under-forecasts** (mean actual 78.6 vs mean predicted 57.7)
+- **38 of 100 occur at 16:00**, 18 at 18:00 - the afternoon commute
+- they fall in just **22 distinct regions** out of 321
+
+So the single characteristic failure is: **the model under-predicts afternoon-rush
+spikes in a small set of very high-volume regions.** That is also the most
+operationally expensive place to be wrong, and it is the concrete target for any
+follow-up work (spike-aware loss, quantile heads, or per-region capacity terms).
+
+### A baseline result that flipped between validation and TEST
+
+On validation, `seasonal_naive_same_week` beat `same_day` (0.872 vs 0.899 mean MAE),
+and Phase 3 adopted it as the baseline. **On TEST the order reverses**: same_day
+1.8430 beats same_week 1.9575 at pickup h1. Nov-Dec contains Thanksgiving and
+Christmas, which break week-over-week seasonality far more than day-over-day. Both
+are reported rather than quietly picking the flattering one.
+
+---
+
+## Phase 6 - Advanced Models (COMPLETE)
+
+- [x] LightGBM tuned, explainability artifacts saved
+- [x] TFT trains, produces sane multi-horizon output, beats Seasonal Naive
+- [x] ST-GNN trains, uses real spatial adjacency, beats Seasonal Naive
+- [x] All six final configs trained: {H3-8, S2-13} x {LightGBM, TFT, ST-GNN}
+- [x] Model artifacts, scalers and experiment metadata saved
+- [x] `docs/STATUS.md` updated, phase committed to git
+
+### LightGBM finalisation (H3-8)
+
+**Objective was tested, not assumed**: Poisson 1.5695 vs `regression_l1` 1.5739 on
+validation -> Poisson kept. **The Phase 3 round cap was the binding constraint it
+was flagged as** - freed to 2,000 rounds with early stopping, the final models
+stopped at 569-1,101 iterations, all genuinely converged.
+
+Bounded Optuna search (10 trials, `pickup_h1`): 1.5695 -> **1.5544**. Mean
+validation MAE across all 8 targets **1.5743**; on TEST, pickup h1 reaches 1.1408.
+
+Gain-based feature importance is dominated by exactly the families the ablation
+kept: `pickups_ewm_4`, `pickups_roll_mean_4`, `pickups_lag_0`,
+`pickups_slot_expanding_mean` - families C, A and B respectively. Full ranking in
+`outputs/metrics/feature_importance_h38.json`.
+
+### The deep half, trained on a Kaggle T4
+
+Four configs, `{H3-8, S2-13} x {ST-GNN, TFT}`, 8 epochs each, ~23 GPU-minutes total.
+Best validation MAE (averaged over all 4 horizons and both targets):
+
+| model | tag | params | best valid MAE | converged? |
+|---|---|---|---|---|
+| TFT | H3-8 | 239,688 | **1.6716** | no - still improving |
+| ST-GNN | H3-8 | 35,432 | 1.7646 | no - still improving |
+| TFT | S2-13 | 239,688 | 1.9674 | no - still improving |
+| ST-GNN | S2-13 | 35,432 | 2.1988 | no - still improving |
+
+Note these validation figures average **all four horizons and both targets**, so
+they are not directly comparable to the h1-only LightGBM numbers above; the TEST
+table in Phase 7 is the like-for-like comparison.
+
+`kaggle_upload/` ships `src/models/deep.py` itself rather than re-typing the
+architectures into the notebook, so the GPU run cannot silently diverge from the
+repo. Scaling statistics are fitted on TRAIN only and baked into each `meta.json`.
+
+**One bug found and fixed in the deep evaluation loop**: validation was scored on
+the first N anchors of the split, which is 1 September starting at midnight - almost
+entirely empty overnight bins. That reported MAE 0.665 where the true figure was
+1.271. Fixed with strided sampling across the whole validation period, in both
+`scripts/21_train_deep.py` and the Kaggle notebook.
+
+---
+
+## Phase 4b - the ablation re-run at H3-8
+
+Phase 4 ran the A-H ablation at H3-9. Phase 5 then chose H3-8, where traffic covers
+**20.2% of regions instead of 5.1%** - so the ablation was re-run at the winning
+resolution to give families D-H a fair test rather than inheriting a verdict from a
+grid where the external data barely existed.
+
+| family | features | pickup MAE | dropoff MAE | mean dMAE | verdict |
+|---|---|---|---|---|---|
+| A demand_recent | 21 | 1.6944 | 1.6675 | - | baseline |
+| B + calendar_seasonal | 76 | **1.5791** | **1.5606** | **+6.60%** | **HELPS** |
+| C + rolling_trend | 125 | 1.5695 | 1.5503 | +0.64% | HELPS |
+| D + weather | 142 | 1.5703 | 1.5511 | -0.05% | no benefit |
+| E + events | 148 | 1.5702 | 1.5516 | -0.01% | no effect |
+| F + traffic | 155 | 1.5702 | 1.5531 | -0.05% | no effect |
+| G + spatial_neighbor | 164 | 1.5675 | 1.5464 | +0.30% | helps slightly |
+| H + station_network | 168 | 1.5684 | 1.5475 | -0.07% | no benefit |
+
+**The H3-9 verdict survives at H3-8, and the traffic result is now much stronger.**
+Quadrupling traffic coverage changed nothing: family F still contributes -0.05%.
+That converts "traffic didn't help, but coverage was only 5%" into a defensible
+negative result - the feature was given four times the reach and still earned
+nothing.
+
+**Final feature set remains A + B + C (125 features).** Family G is the one genuine
+change (+0.30% at H3-8 versus -0.06% at H3-9), but the sets are cumulative, so
+taking G would drag D, E and F in with it for a gain inside noise. Recorded as
+`advanced_features.final_families` in `configs/base.yaml`.
 
 ---
 
@@ -450,6 +701,14 @@ bare directory pattern matches at any depth. Now `/data/`.
 
 ## Running log
 
+- **2026-08-25** - **Phases 6-8 complete; project finished.** Ablation re-run at
+  H3-8 (traffic coverage 20.2% vs 5.1%) confirmed A+B+C and turned the traffic null
+  result from "thin coverage" into a real finding. LightGBM finalised at both H3-8
+  and S2-13 (objective tested, Optuna, early stopping now binding). Deep matrix
+  trained on a Kaggle T4. TEST opened once: LightGBM wins MAE, TFT wins WAPE, ST-GNN
+  wins Hotspot-F1. Phase 8 found rebalancing does not pay at region granularity, and
+  that LightGBM out-rebalances perfect foresight by moving less. Standardized
+  `predict()` interface added with 10 tests. 146 tests green.
 - **2026-08-25** — Phase 3 gate PASSED. 103M-row feature table (36 model inputs)
   built in region batches; Seasonal Naive (both variants) + 8 LightGBM models
   trained; LightGBM beats the better naive on 8/8 targets by 18.5-20.8% MAE.
