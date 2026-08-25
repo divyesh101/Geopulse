@@ -1,0 +1,418 @@
+/* GeoPulse frontend.
+   Every number rendered here comes from the API, which calls the same tools the
+   assistant does — so the cards and the chat can never disagree. */
+
+const $ = (id) => document.getElementById(id);
+const state = {
+  grid: "h3-8",
+  model: "lightgbm_final",
+  horizon: 4,
+  when: null,
+  place: null,
+  history: [],
+  config: null,
+  maxPickups: 1,
+  busy: false,
+};
+
+/* ── map ─────────────────────────────────────────────────────────── */
+const dark = matchMedia("(prefers-color-scheme: dark)").matches;
+const tiles = dark
+  ? "https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
+  : "https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png";
+
+const map = new maplibregl.Map({
+  container: "map",
+  style: {
+    version: 8,
+    sources: {
+      base: {
+        type: "raster", tiles: [tiles], tileSize: 256,
+        attribution: '&copy; <a href="https://openstreetmap.org">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
+      },
+    },
+    layers: [{ id: "base", type: "raster", source: "base" }],
+  },
+  center: [-73.978, 40.745],
+  zoom: 11.7,
+  attributionControl: { compact: true },
+});
+map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "bottom-right");
+
+let marker = null;
+
+map.on("load", async () => {
+  map.addSource("cells", { type: "geojson", data: emptyFC() });
+  map.addLayer({
+    id: "cells-fill", type: "fill", source: "cells",
+    paint: {
+      // `pickups` is a 0-4 log-scaled index, not a raw count (see refresh()):
+      // a few Midtown cells carry most of the demand, so a linear ramp would
+      // render the rest of the city as one flat colour
+      "fill-color": [
+        "interpolate", ["linear"], ["coalesce", ["get", "pickups"], 0],
+        0, dark ? "#1b2b26" : "#dbe7e2",
+        0.8, dark ? "#22513f" : "#b9dccd",
+        1.8, "#86c9ae",
+        2.6, "#2fbc8d",
+        3.3, "#f2a65a",
+        4, "#e8590c",
+      ],
+      "fill-opacity": ["case", ["boolean", ["feature-state", "hover"], false], 0.82, 0.6],
+    },
+  });
+  map.addLayer({
+    id: "cells-line", type: "line", source: "cells",
+    paint: { "line-color": dark ? "#2fbc8d" : "#0b7a5a", "line-width": 0.35, "line-opacity": 0.5 },
+  });
+  map.addLayer({
+    id: "cells-focus", type: "line", source: "cells",
+    filter: ["==", ["get", "region_id"], "__none__"],
+    paint: { "line-color": dark ? "#eef2f4" : "#10161a", "line-width": 2.4 },
+  });
+
+  map.on("click", "cells-fill", (e) => {
+    const f = e.features[0];
+    dropPin(e.lngLat.lat, e.lngLat.lng, `Cell ${f.properties.region_id.slice(0, 8)}…`);
+    loadStations(e.lngLat.lat, e.lngLat.lng);
+  });
+  map.on("mouseenter", "cells-fill", () => (map.getCanvas().style.cursor = "pointer"));
+  map.on("mouseleave", "cells-fill", () => (map.getCanvas().style.cursor = ""));
+
+  await boot();
+});
+
+function emptyFC() { return { type: "FeatureCollection", features: [] }; }
+
+/* ── boot ────────────────────────────────────────────────────────── */
+async function boot() {
+  const cfg = await fetch("/api/config").then((r) => r.json());
+  state.config = cfg;
+  // the datetime-local field is naive and the backend reads a naive value as NYC
+  // local time, so seed it from the local default - seeding from a UTC ISO string
+  // would show a time five hours off and silently shift on first edit
+  state.when = cfg.window.default_local;
+
+  renderChips("model-chips", cfg.models.map((m) => ({ id: m.id, label: m.label })),
+    () => state.model, (v) => { state.model = v; refresh(); });
+  renderChips("grid-chips", cfg.grids.map((g) => ({ id: g.id, label: g.label })),
+    () => state.grid, (v) => { state.grid = v; loadGeometry().then(refresh); });
+  renderChips("horizon-chips", cfg.horizons.map((h) => ({ id: String(h.value), label: h.label })),
+    () => String(state.horizon), (v) => { state.horizon = Number(v); refresh(); });
+
+  const when = $("when-input");
+  when.min = cfg.window.start_local.slice(0, 16);
+  when.max = cfg.window.end_local.slice(0, 16);
+  when.value = cfg.window.default_local.slice(0, 16);
+  when.addEventListener("change", () => {
+    if (!when.value) return;
+    state.when = when.value;
+    refresh();
+  });
+
+  $("mode-text").textContent = cfg.assistant_mode;
+  $("mode-badge").title = cfg.assistant_model
+    ? `Assistant: ${cfg.assistant_mode} (${cfg.assistant_model})`
+    : "Assistant: built-in router (no API key set)";
+  showNotice(cfg.notice);
+
+  await loadGeometry();
+  await refresh();
+  addBot("Ask me where you are and I'll tell you how the bikes are moving. "
+    + "I forecast **trip demand**, not live dock counts — there's no historical "
+    + "dock data for 2023–24, so I report flow pressure instead of a bike count.");
+}
+
+function renderChips(containerId, items, get, set) {
+  const box = $(containerId);
+  box.innerHTML = "";
+  items.forEach((item) => {
+    const b = document.createElement("button");
+    b.className = "chip";
+    b.type = "button";
+    b.textContent = item.label;
+    b.setAttribute("aria-pressed", String(get() === item.id));
+    b.addEventListener("click", () => {
+      set(item.id);
+      [...box.children].forEach((c) => c.setAttribute("aria-pressed", String(c === b)));
+    });
+    box.appendChild(b);
+  });
+}
+
+function showNotice(text) {
+  const el = $("notice");
+  el.textContent = text || "";
+  el.classList.toggle("show", Boolean(text));
+}
+
+/* ── data ────────────────────────────────────────────────────────── */
+let geometry = emptyFC();
+
+async function loadGeometry() {
+  geometry = await fetch(`/api/geojson?grid=${state.grid}`).then((r) => r.json());
+}
+
+async function refresh() {
+  const url = `/api/overview?grid=${state.grid}&model=${state.model}`
+    + `&horizon=${state.horizon}&when=${encodeURIComponent(state.when || "")}`;
+  const data = await fetch(url).then((r) => r.json());
+  if (!data.ok) { showNotice(data.error || "Could not load the forecast."); return; }
+  showNotice(state.config?.notice);
+
+  const byRegion = new Map(data.regions.map((r) => [r.region_id, r]));
+  const max = Math.max(...data.regions.map((r) => r.cumulative_pickups), 1);
+  state.maxPickups = max;
+  $("legend-max").textContent = Math.round(max);
+
+  // log scale: a handful of Midtown cells carry most of the demand, so a linear
+  // ramp would render the rest of the city as one flat colour
+  geometry.features.forEach((f) => {
+    const row = byRegion.get(f.properties.region_id);
+    const v = row ? row.cumulative_pickups : 0;
+    f.properties.pickups = v > 0 ? Math.log1p(v) / Math.log1p(max) * 4 : 0;
+    f.properties.raw = v;
+  });
+  map.getSource("cells").setData(geometry);
+
+  if (!state.place) {
+    $("sheet-sub").textContent =
+      `${data.model_label} · ${Math.round(data.total_predicted_pickups).toLocaleString()} `
+      + `pickups citywide in the next ${data.window_minutes} min · ${data.time.local_pretty}`;
+  }
+  if (state.place) await loadStations(state.place.lat, state.place.lng, false);
+}
+
+async function loadStations(lat, lng, moveMap = true) {
+  const url = `/api/station_forecast?lat=${lat}&lng=${lng}&grid=${state.grid}`
+    + `&model=${state.model}&horizon=${state.horizon}`
+    + `&when=${encodeURIComponent(state.when || "")}&k=4`;
+  const data = await fetch(url).then((r) => r.json());
+  if (!data.ok) { showNotice(data.error); return; }
+  renderStationCards(data);
+  if (data.stations.length) {
+    const region = data.stations[0].station.region_id;
+    map.setFilter("cells-focus", ["==", ["get", "region_id"], region]);
+  }
+  if (moveMap) map.easeTo({ center: [lng, lat], zoom: Math.max(map.getZoom(), 13.4) });
+  expand(true);
+}
+
+/* ── rendering ───────────────────────────────────────────────────── */
+function renderStationCards(data) {
+  const box = $("cards");
+  box.innerHTML = "";
+  $("sheet-sub").textContent =
+    `${data.model_label} · next ${data.window_minutes} min · ${data.time.local_pretty}`;
+
+  data.stations.forEach((s) => {
+    const st = s.station;
+    const v = s.availability;
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML = `
+      <div class="card-top">
+        <span class="card-name"></span>
+        <span class="card-dist">${distance(st.distance_km)}</span>
+      </div>
+      <div class="flow">
+        <div class="out"><div class="n">${s.predicted_pickups.toFixed(0)}</div>
+          <div class="k">picked up</div></div>
+        <div class="in"><div class="n">${s.predicted_dropoffs.toFixed(0)}</div>
+          <div class="k">returned</div></div>
+      </div>
+      <span class="pill ${v.verdict}"></span>
+      <p class="card-note"></p>
+      <div class="card-approx"></div>`;
+    card.querySelector(".card-name").textContent = st.station_name;
+    card.querySelector(".pill").textContent = v.label;
+    card.querySelector(".card-note").textContent = v.detail;
+    card.querySelector(".card-approx").textContent =
+      `Derived: ${(st.pickup_share * 100).toFixed(1)}% share of its cell's `
+      + `${s.region_pickups.toFixed(0)} predicted pickups · ${v.measures}`;
+    card.addEventListener("click", () => dropPin(st.lat, st.lng, st.station_name));
+    box.appendChild(card);
+  });
+}
+
+function renderComparison(data) {
+  const box = $("cards");
+  const max = Math.max(
+    ...data.models.map((m) => m.region_pickups),
+    data.actual_region_pickups || 0, 1);
+  const rows = data.models
+    .map((m) => barRow(m.label, m.region_pickups, max, false))
+    .join("");
+  const actual = data.actual_region_pickups != null
+    ? barRow("Actual", data.actual_region_pickups, max, true) : "";
+  const card = document.createElement("div");
+  card.className = "card";
+  card.innerHTML = `
+    <div class="card-top"><span class="card-name">Model comparison</span></div>
+    <p class="card-note" style="margin:6px 0 10px">
+      Predicted pickups in this cell for the ${data.bin_minutes}-minute bin
+      ${data.horizon * data.bin_minutes} min ahead.</p>
+    <div class="bars">${rows}${actual}</div>
+    <div class="card-approx">Cell-level figures, directly comparable to the actual.
+      On the TEST set these rank LightGBM &gt; ST-GNN &gt; TFT on MAE.</div>`;
+  box.prepend(card);
+}
+
+function barRow(name, value, max, isActual) {
+  const pct = Math.max(2, (value / max) * 100);
+  return `<div class="bar-row">
+      <span class="bar-name">${escapeHtml(name)}</span>
+      <span class="bar-track"><span class="bar-fill${isActual ? " actual" : ""}"
+        style="width:${pct}%"></span></span>
+      <span class="bar-val">${value.toFixed(0)}</span>
+    </div>`;
+}
+
+function distance(km) {
+  if (km < 0.02) return "here";
+  return km < 1 ? `${Math.round(km * 1000)} m` : `${km.toFixed(1)} km`;
+}
+
+function dropPin(lat, lng, label) {
+  state.place = { lat, lng, name: label };
+  $("sheet-place").textContent = label;
+  if (marker) marker.remove();
+  const el = document.createElement("div");
+  el.style.cssText = "width:16px;height:16px;border-radius:50%;background:#0b7a5a;"
+    + "border:3px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,.35)";
+  marker = new maplibregl.Marker({ element: el }).setLngLat([lng, lat]).addTo(map);
+}
+
+/* ── search ──────────────────────────────────────────────────────── */
+const input = $("place-input");
+const suggestions = $("suggestions");
+let searchTimer = null;
+
+input.addEventListener("input", () => {
+  $("place-clear").hidden = !input.value;
+  clearTimeout(searchTimer);
+  const q = input.value.trim();
+  if (q.length < 2) { suggestions.hidden = true; return; }
+  searchTimer = setTimeout(async () => {
+    const res = await fetch(`/api/place?q=${encodeURIComponent(q)}`);
+    const data = await res.json();
+    if (!data.ok) { suggestions.hidden = true; return; }
+    suggestions.innerHTML = "";
+    data.matches.forEach((m) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.innerHTML = `<span class="s-name"></span><span class="s-kind">${m.source}</span>`;
+      b.querySelector(".s-name").textContent = m.name;
+      b.addEventListener("click", () => {
+        input.value = m.name;
+        suggestions.hidden = true;
+        dropPin(m.lat, m.lng, m.name);
+        loadStations(m.lat, m.lng);
+      });
+      suggestions.appendChild(b);
+    });
+    suggestions.hidden = false;
+  }, 180);
+});
+
+$("place-clear").addEventListener("click", () => {
+  input.value = ""; suggestions.hidden = true; $("place-clear").hidden = true;
+  state.place = null;
+  $("sheet-place").textContent = "NYC overview";
+  $("cards").innerHTML = "";
+  map.setFilter("cells-focus", ["==", ["get", "region_id"], "__none__"]);
+  if (marker) { marker.remove(); marker = null; }
+  refresh();
+});
+
+document.addEventListener("click", (e) => {
+  if (!e.target.closest(".topbar")) suggestions.hidden = true;
+});
+
+/* ── sheet ───────────────────────────────────────────────────────── */
+function expand(on) {
+  $("sheet").classList.toggle("expanded", on);
+  document.body.classList.toggle("expanded", on);
+}
+$("grabber").addEventListener("click", () =>
+  expand(!$("sheet").classList.contains("expanded")));
+
+/* ── chat ────────────────────────────────────────────────────────── */
+function addMsg(text, cls, { raw = false } = {}) {
+  const el = document.createElement("div");
+  el.className = `msg ${cls}`;
+  // `raw` is only ever used for markup this file authored (the typing dots);
+  // anything from the server or the user goes through escaping
+  el.innerHTML = raw ? text : cls === "user" ? escapeHtml(text) : markdown(text);
+  $("chat").appendChild(el);
+  $("sheet-body").scrollTop = $("sheet-body").scrollHeight;
+  return el;
+}
+const addBot = (t) => addMsg(t, "bot");
+
+function markdown(text) {
+  return escapeHtml(text)
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/\n/g, "<br>");
+}
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+$("composer").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const text = $("chat-input").value.trim();
+  if (!text || state.busy) return;
+  $("chat-input").value = "";
+  send(text);
+});
+
+$("quick").addEventListener("click", (e) => {
+  const b = e.target.closest("button");
+  if (b && !state.busy) send(b.dataset.q);
+});
+
+async function send(text) {
+  state.busy = true;
+  $("send").disabled = true;
+  expand(true);
+  addMsg(text, "user");
+  const thinking = addMsg('<span class="typing"><i></i><i></i><i></i></span>',
+                          "bot", { raw: true });
+
+  try {
+    const res = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: text, grid: state.grid, model: state.model,
+        horizon: state.horizon, when: state.when,
+        history: state.history, last_place: state.place,
+      }),
+    });
+    const data = await res.json();
+    thinking.remove();
+    addBot(data.text || "No answer.");
+    if (data.degraded) addMsg(data.degraded, "bot warn");
+    state.history = data.history || [];
+
+    if (data.place && data.place.lat) {
+      dropPin(data.place.lat, data.place.lng, data.place.name || "Selected place");
+      map.easeTo({ center: [data.place.lng, data.place.lat],
+        zoom: Math.max(map.getZoom(), 13.4) });
+    }
+    // render cards from the same payloads the assistant saw
+    (data.data || []).forEach((payload) => {
+      if (!payload || !payload.ok) return;
+      if (payload.stations) renderStationCards(payload);
+      if (payload.models) renderComparison(payload);
+    });
+  } catch (err) {
+    thinking.remove();
+    addMsg(`Something went wrong: ${err.message}`, "bot warn");
+  } finally {
+    state.busy = false;
+    $("send").disabled = false;
+  }
+}

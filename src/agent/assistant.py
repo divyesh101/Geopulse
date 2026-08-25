@@ -193,6 +193,23 @@ def _extract_time(message: str, fallback: str | None) -> str | None:
     return fallback
 
 
+def _place_from_calls(calls: list[dict]) -> dict | None:
+    """The last place an LLM actually resolved, so the map can follow it."""
+    for call in reversed(calls):
+        result = call.get("result") or {}
+        if call.get("tool") == "find_place" and result.get("ok"):
+            return result["best"]
+        # station_forecast carries coordinates too, if find_place was skipped
+        if call.get("tool") in ("station_forecast", "explain_forecast",
+                                "compare_models") and result.get("ok"):
+            station = (result.get("station")
+                       or (result.get("stations") or [{}])[0].get("station"))
+            if station and station.get("lat") is not None:
+                return {"name": station["station_name"], "lat": station["lat"],
+                        "lng": station["lng"], "source": "station"}
+    return None
+
+
 def _openai_style_tools() -> list[dict]:
     """The same tools in the function-calling shape Mistral expects."""
     return [{"type": "function",
@@ -249,7 +266,14 @@ class Assistant:
         brain = brains.get(self.mode)
         if brain is not None:
             try:
-                return brain(message, session)
+                out = brain(message, session)
+                # the router sets `place` inline; an LLM decides for itself which
+                # tools to call, so recover the location it settled on from the
+                # find_place result - otherwise the map never follows the answer
+                if not out.get("place"):
+                    out["place"] = _place_from_calls(out.get("tool_calls", [])) \
+                        or session.get("last_place")
+                return out
             except Exception as exc:                      # noqa: BLE001
                 # a bad key, a rate limit or a network blip should degrade to the
                 # deterministic path rather than 500 the whole app
