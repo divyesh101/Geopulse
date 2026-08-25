@@ -25,7 +25,7 @@ const prefersDark = matchMedia("(prefers-color-scheme: dark)").matches;
 
 /** Palette derived from the active basemap's own theme, not the OS, so a dark
  *  basemap under a light OS still gets readable overlay colours. */
-let theme = prefersDark ? "dark" : "light";
+let theme = "light";        // Liberty is a light style; the switcher updates this
 const palette = () => (theme === "dark"
   ? { cell0: "#1b2b26", cell1: "#22513f", accent: "#54e3b3", route: "#7ef0c8",
       focus: "#54e3b3" }
@@ -34,9 +34,10 @@ const palette = () => (theme === "dark"
 
 const map = new maplibregl.Map({
   container: "map",
-  style: prefersDark
-    ? "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json"
-    : "https://tiles.openfreemap.org/styles/liberty",
+  // Always the full-detail street map. Keying this off the OS theme sent dark-mode
+  // users to a minimal basemap with no buildings, shops or POI names, which reads
+  // as a broken map rather than a styling choice.
+  style: "https://tiles.openfreemap.org/styles/liberty",
   center: [-73.978, 40.745],
   zoom: 11.7,
   attributionControl: { compact: true },
@@ -47,6 +48,7 @@ let marker = null;
 let geometry = { type: "FeatureCollection", features: [] };
 let routeData = null;
 let blinkRegion = null;
+let stationsFC = { type: "FeatureCollection", features: [] };
 
 /** The id of the first symbol layer, so overlays slot in underneath the labels. */
 function firstSymbolLayer() {
@@ -74,12 +76,19 @@ function addOverlays() {
         0, c.cell0, 0.8, c.cell1, 1.8, "#86c9ae",
         2.6, "#2fbc8d", 3.3, "#f2a65a", 4, "#e8590c",
       ],
-      "fill-opacity": 0.55,
+      // starts invisible: the heatmap is a lens you turn on, not wallpaper. It
+      // otherwise covers the buildings, shop names and street labels that make the
+      // map worth looking at.
+      "fill-opacity": 0,
+      "fill-opacity-transition": { duration: 450 },
     },
   }, under);
   map.addLayer({
     id: "cells-line", type: "line", source: "cells",
-    paint: { "line-color": c.accent, "line-width": 0.4, "line-opacity": 0.45 },
+    paint: {
+      "line-color": c.accent, "line-width": 0.4, "line-opacity": 0,
+      "line-opacity-transition": { duration: 450 },
+    },
   }, under);
   // the focused cell pulses translucently rather than filling solid, so the
   // streets underneath stay readable while the eye is drawn to it
@@ -125,6 +134,48 @@ function addOverlays() {
     },
   }, under);
 
+  // Real Citi Bike docks, with their real names - 2,459 of them from the station
+  // registry. Drawn above the labels so a dock is never hidden by a street name.
+  map.addSource("stations", { type: "geojson", data: stationsFC });
+  map.addLayer({
+    id: "stations-dot", type: "circle", source: "stations",
+    minzoom: 12.5,
+    paint: {
+      "circle-radius": ["interpolate", ["linear"], ["zoom"], 12.5, 2.2, 15, 4.5, 17, 7],
+      "circle-color": c.accent,
+      "circle-opacity": 0.9,
+      "circle-stroke-width": ["interpolate", ["linear"], ["zoom"], 12.5, 0.5, 15, 1.5],
+      "circle-stroke-color": theme === "dark" ? "#06231a" : "#ffffff",
+    },
+  });
+  map.addLayer({
+    id: "stations-label", type: "symbol", source: "stations",
+    minzoom: 14.6,
+    layout: {
+      "text-field": ["get", "name"],
+      "text-font": ["Noto Sans Regular"],
+      "text-size": 11,
+      "text-offset": [0, 1.1],
+      "text-anchor": "top",
+      "text-max-width": 9,
+      "text-allow-overlap": false,
+      "text-optional": true,
+    },
+    paint: {
+      "text-color": theme === "dark" ? "#a9f3d6" : "#0b5f47",
+      "text-halo-color": theme === "dark" ? "#0e1215" : "#ffffff",
+      "text-halo-width": 1.6,
+    },
+  });
+
+  map.on("click", "stations-dot", (e) => {
+    const f = e.features[0];
+    dropPin(f.geometry.coordinates[1], f.geometry.coordinates[0], f.properties.name);
+    loadStations(f.geometry.coordinates[1], f.geometry.coordinates[0]);
+  });
+  map.on("mouseenter", "stations-dot", () => (map.getCanvas().style.cursor = "pointer"));
+  map.on("mouseleave", "stations-dot", () => (map.getCanvas().style.cursor = ""));
+
   map.on("click", "cells-fill", (e) => {
     const f = e.features[0];
     dropPin(e.lngLat.lat, e.lngLat.lng, `Cell ${f.properties.region_id.slice(0, 8)}…`);
@@ -142,6 +193,8 @@ function setBasemap(style) {
   map.once("styledata", () => {
     addOverlays();
     if (map.getSource("cells")) map.getSource("cells").setData(geometry);
+    if (map.getSource("stations")) map.getSource("stations").setData(stationsFC);
+    setGridVisible(gridVisible);
     if (routeData) drawRoute(routeData, false);
     if (blinkRegion) startBlink(blinkRegion);
   });
@@ -194,6 +247,20 @@ function startBlink(regionId) {
   };
   blinkFrame = requestAnimationFrame(tick);
 }
+/** Fade the choropleth in or out. Hidden by default so the real map shows through;
+ *  turned on when the user is actually looking at demand. */
+let gridVisible = false;
+function setGridVisible(on) {
+  gridVisible = on;
+  if (!map.getLayer("cells-fill")) return;
+  map.setPaintProperty("cells-fill", "fill-opacity", on ? 0.5 : 0);
+  map.setPaintProperty("cells-line", "line-opacity", on ? 0.4 : 0);
+  const toggle = $("grid-toggle");
+  if (toggle) toggle.setAttribute("aria-pressed", String(on));
+  const legend = $("legend");
+  if (legend) legend.classList.toggle("hidden", !on);
+}
+
 function stopBlink() {
   if (blinkFrame) cancelAnimationFrame(blinkFrame);
   blinkFrame = null;
@@ -302,6 +369,8 @@ async function boot() {
   });
 
   renderBasemaps(cfg.basemaps || []);
+  $("grid-toggle").addEventListener("click", () => setGridVisible(!gridVisible));
+  setGridVisible(false);
 
   $("mode-text").textContent = cfg.assistant_mode;
   $("mode-badge").title = cfg.assistant_model
@@ -310,6 +379,7 @@ async function boot() {
   showNotice(cfg.notice);
 
   await loadGeometry();
+  await loadStationLayer();
   await refresh();
   addBot("Ask me where you are and I'll tell you how the bikes are moving. "
     + "I forecast **trip demand**, not live dock counts — there's no historical "
@@ -377,6 +447,21 @@ function showNotice(text) {
 }
 
 /* ── data ────────────────────────────────────────────────────────── */
+async function loadStationLayer() {
+  const data = await fetch(`/api/stations?grid=${state.grid}`)
+    .then((r) => r.json()).catch(() => null);
+  if (!data || !data.stations) return;
+  stationsFC = {
+    type: "FeatureCollection",
+    features: data.stations.map((st) => ({
+      type: "Feature",
+      properties: { name: st.station_name, region_id: st.region_id },
+      geometry: { type: "Point", coordinates: [st.lng, st.lat] },
+    })),
+  };
+  if (map.getSource("stations")) map.getSource("stations").setData(stationsFC);
+}
+
 async function loadGeometry() {
   geometry = await fetch(`/api/geojson?grid=${state.grid}`).then((r) => r.json());
 }
@@ -418,6 +503,8 @@ async function loadStations(lat, lng, moveMap = true) {
   const data = await fetch(url).then((r) => r.json());
   if (!data.ok) { showNotice(data.error); return; }
   renderStationCards(data);
+  // glow the cell you asked about; the full heatmap stays off unless requested,
+  // so the streets, shops and buildings underneath remain visible
   if (data.stations.length) startBlink(data.stations[0].station.region_id);
   if (moveMap) flyToPlace(lat, lng, 15.2);
   expand(true);

@@ -4,20 +4,21 @@
 explicit graph, the same family of search Google Maps runs (they use contraction
 hierarchies on top, which is an index over the same shortest-path problem).
 
-**The graph is ours, and that is the honest caveat.** This repo has no pedestrian
-street network - the 128 traffic links are arterials and highways, not a walkable
-graph - so nodes are Citi Bike stations and edges join stations that are close enough
-to walk between. Segments are therefore straight lines between docks, not
-street-following geometry. Distances apply `DETOUR_FACTOR`, the standard correction
-for straight-line versus grid-street walking, so the *lengths* are realistic even
-though the drawn line cuts corners.
+**Two graphs, two jobs.**
 
-Two properties fall out of the edge cap that are worth knowing:
+1. *Which dock?* - this module. Nodes are Citi Bike stations, edges join docks close
+   enough to walk between. Candidates are scored on distance plus a penalty from the
+   demand forecast. The edge cap also means this graph never crosses water: there
+   are no stations mid-river and the spans exceed `MAX_EDGE_KM`.
+2. *How do you walk there?* - `src/serving/streets.py`, A* over the OpenStreetMap
+   pedestrian network, so the drawn line follows real pavements and the distance is
+   measured rather than estimated.
 
-* the graph does not cross water, because there are no stations mid-river and the
-  spans are far longer than `MAX_EDGE_KM`;
-* it degrades gracefully in low-density areas - an isolated station simply has fewer
-  edges, and the search reports failure rather than inventing a link.
+When street data is unavailable - no network, an Overpass rate limit, nothing mapped
+nearby - the route falls back to a straight line between docks with `DETOUR_FACTOR`
+applied, and `follows_streets` reports which of the two the caller is looking at.
+That flag must survive to the UI: a straight line drawn as if it were a walking
+route is the kind of small lie that makes everything else look untrustworthy.
 
 **Why not just walk to the nearest dock?** Because the nearest one may be draining.
 `route_to_best_station` scores candidates on walking distance *plus* a penalty
@@ -224,6 +225,23 @@ def route_to_best_station(lat: float, lng: float, candidates: list[dict], *,
 
     coordinates = [[lng, lat]] + [[float(graph.lng[i]), float(graph.lat[i])]
                                   for i in path_nodes]
+
+    # Upgrade the drawn line to a real pavement-following path where we can. The
+    # station graph decides *which* dock; OpenStreetMap decides *how you walk there*.
+    # Imported here rather than at module scope because streets.py reuses this
+    # module's Graph and astar.
+    street = None
+    try:
+        from src.serving.streets import StreetError, walk_route
+
+        target_node = path_nodes[-1]
+        street = walk_route((lat, lng),
+                            (float(graph.lat[target_node]),
+                             float(graph.lng[target_node])))
+    except Exception:                                   # noqa: BLE001
+        # no network, an Overpass rate limit, or nothing mapped nearby - fall back
+        # to the straight-line station path rather than failing the request
+        street = None
     legs = []
     previous = (lat, lng)
     for node in path_nodes:
@@ -239,6 +257,11 @@ def route_to_best_station(lat: float, lng: float, candidates: list[dict], *,
     # legs[0] is the walk from the origin into the graph; path_m covers the hops
     entry_m = legs[0]["metres"] if legs else 0.0
     total_m = entry_m + path_m
+    # a street path is the truth when we have one: it measures real pavement rather
+    # than a straight line scaled by a detour guess
+    if street is not None:
+        total_m = street["metres"]
+        coordinates = street["coordinates"]
     too_far = total_m > MAX_REASONABLE_WALK_M
     return {
         "ok": True,
@@ -261,15 +284,24 @@ def route_to_best_station(lat: float, lng: float, candidates: list[dict], *,
         "graph": {"nodes": graph.n_nodes, "edges": graph.n_edges,
                   "neighbours_per_node": NEIGHBOURS,
                   "max_edge_km": MAX_EDGE_KM},
-        "method": "A* with an admissible haversine heuristic",
+        "follows_streets": street is not None,
+        "street_detail": street and {
+            "nodes": street["nodes"], "graph": street["graph"],
+            "snap_metres": street["snap_metres"], "source": street["source"]},
+        "method": ("A* over the OpenStreetMap walking network"
+                   if street is not None
+                   else "A* over the station-proximity graph"),
         "reachability": (
             f"The nearest dock is {total_m / 1000:.1f} km away - beyond walking "
             f"distance. Citi Bike does not cover this part of the city."
             if too_far else "within walking distance"),
-        "caveat": ("Nodes are Citi Bike stations and edges join docks within "
-                   f"{MAX_EDGE_KM * 1000:.0f} m - this repo has no pedestrian street "
-                   f"network, so segments are straight lines between docks rather "
-                   f"than street geometry. Lengths apply a {DETOUR_FACTOR}x detour "
-                   f"factor, so the distance is realistic even where the line cuts "
-                   f"a corner."),
+        "caveat": (
+            "The dock is chosen on a station graph weighted by distance and forecast "
+            "availability; the walking line is A* over the OpenStreetMap pedestrian "
+            "network, so it follows real streets and the distance is measured, not "
+            "estimated."
+            if street is not None else
+            "Street data was unavailable, so this falls back to a straight line "
+            f"between docks with a {DETOUR_FACTOR}x detour factor applied to the "
+            f"distance. The line cuts corners; the length is still realistic."),
     }

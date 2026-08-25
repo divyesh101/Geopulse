@@ -461,3 +461,10 @@ body.expanded .legend { bottom: calc(var(--sheet-expanded) + 16px); }
 .ms-detail { font-size: 10.5px; color: var(--ink-3); line-height: 1.35; }
 
 @media (max-width: 480px) { .mapstyle { top: 78px; } }
+
+/* heatmap toggle sits under the style button */
+.grid-toggle { margin-top: 8px; }
+.grid-toggle[aria-pressed="true"] { background: var(--brand); border-color: var(--brand); }
+.grid-toggle[aria-pressed="true"] svg { stroke: var(--brand-ink); }
+.legend { transition: bottom .34s cubic-bezier(.32,.72,0,1), opacity .3s, transform .3s; }
+.legend.hidden { opacity: 0; transform: translateY(6px); pointer-events: none; }
