@@ -39,9 +39,9 @@ the model's forecast is typically off by about **one bike**.
 
 ## Models used
 
-- **LightGBM** (gradient-boosted trees, tuned with Optuna) — best-performing model
-- **Temporal Fusion Transformer (TFT)** — deep learning, Transformer-based
-- **Spatio-Temporal GNN (ST-GNN)** — deep learning, graph-based
+- **LightGBM** (gradient-boosted trees, tuned with Optuna) 
+- **Temporal Fusion Transformer (TFT)** — deep learning, Transformer-based 
+- **Spatio-Temporal GNN (ST-GNN)** — deep learning, graph-based (best-performing model)
 - **Seasonal Naive** — baseline for comparison
 
 ## A working demo app
